@@ -41,9 +41,8 @@ load_dotenv()
 # Define log retention for the script's own log files
 LOG_RETENTION_DAYS = 7
 
-# For normal operation, set LOG_LEVEL to logging.INFO.
-# For detailed debugging, set to logging.DEBUG.
-LOG_LEVEL = logging.INFO  # Setting to INFO for typical production use. Change to DEBUG for detailed troubleshooting.
+# Default LOG_LEVEL. This will be overridden by command-line argument if provided.
+DEFAULT_LOG_LEVEL = logging.INFO
 
 # Default qBittorrent connection details (can be overridden by command-line arguments or environment variables)
 # Prioritize environment variables, then command-line defaults
@@ -89,7 +88,8 @@ AIRDCPP_AUTH_TOKEN = None
 # --- LOGGING CONFIGURATION START ---
 # Create a logger instance
 logger = logging.getLogger(__name__)
-logger.setLevel(LOG_LEVEL)
+# Log level will be set dynamically based on CLI args in main()
+# logger.setLevel(LOG_LEVEL) # Removed from here
 
 # Create a formatter for log messages
 formatter = logging.Formatter(
@@ -97,10 +97,8 @@ formatter = logging.Formatter(
 )
 
 # Console handler (outputs to stdout)
-# Set to INFO: will show INFO, WARNING, ERROR, CRITICAL on console
-# Set to DEBUG: will show all DEBUG, INFO, WARNING, ERROR, CRITICAL on console
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)  # Console output less verbose (INFO and above)
+# console_handler.setLevel(logging.INFO) # Level set dynamically in main()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
@@ -168,11 +166,10 @@ def cleanup_old_logs():
 current_script_log_file_path = get_current_run_log_file_path()
 
 # File handler (outputs to a file)
+file_handler = None # Initialize to None
 try:
     file_handler = logging.FileHandler(current_script_log_file_path)
-    file_handler.setLevel(
-        LOG_LEVEL
-    )  # File handler captures all messages at or above LOG_LEVEL
+    # file_handler.setLevel(LOG_LEVEL) # Level set dynamically in main()
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     logger.info(f"Logging current run to: {current_script_log_file_path}")
@@ -1034,7 +1031,22 @@ def main():
         action="store_true",
         help="Perform a dry run: search for comics but do not initiate actual downloads or send live Discord notifications (notifications will be marked as dry run).",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (e.g., INFO, DEBUG, WARNING). Default is INFO.",
+    )
     args = parser.parse_args()
+
+    # Set logging level based on command-line argument
+    numeric_log_level = getattr(logging, args.log_level.upper(), DEFAULT_LOG_LEVEL)
+    logger.setLevel(numeric_log_level)
+    console_handler.setLevel(numeric_log_level)
+    if file_handler: # Only set if file_handler was successfully created
+        file_handler.setLevel(numeric_log_level)
+
 
     # Clean up old logs at the start of the main execution
     cleanup_old_logs()
