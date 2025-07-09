@@ -999,6 +999,9 @@ def download_airdcpp(file_info, session_search_id, is_dry_run=False):
 
 # --- Main Automation Logic ---
 
+def log_level_type(arg):
+    """Custom type function for argparse to convert log level input to uppercase."""
+    return arg.upper()
 
 def main():
     """
@@ -1033,7 +1036,7 @@ def main():
     )
     parser.add_argument(
         "--log-level",
-        type=str,
+        type=log_level_type, # Use the custom type function here
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (e.g., INFO, DEBUG, WARNING). Default is INFO.",
@@ -1041,7 +1044,7 @@ def main():
     args = parser.parse_args()
 
     # Set logging level based on command-line argument
-    numeric_log_level = getattr(logging, args.log_level.upper(), DEFAULT_LOG_LEVEL)
+    numeric_log_level = getattr(logging, args.log_level, DEFAULT_LOG_LEVEL) # args.log_level is already uppercase now
     logger.setLevel(numeric_log_level)
     console_handler.setLevel(numeric_log_level)
     if file_handler: # Only set if file_handler was successfully created
