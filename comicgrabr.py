@@ -999,9 +999,16 @@ def download_airdcpp(file_info, session_search_id, is_dry_run=False):
 
 # --- Main Automation Logic ---
 
-def log_level_type(arg):
-    """Custom type function for argparse to convert log level input to uppercase."""
-    return arg.upper()
+def log_level_type(value):
+    """
+    Custom type function for argparse to convert log level input to uppercase
+    and validate against a list of valid logging levels.
+    """
+    value = value.upper()
+    valid = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    if value not in valid:
+        raise argparse.ArgumentTypeError(f"Invalid log level: {value} (choose from {', '.join(valid)})")
+    return value
 
 def main():
     """
@@ -1038,7 +1045,7 @@ def main():
         "--log-level",
         type=log_level_type, # Use the custom type function here
         default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], # Keep choices for help message and basic validation
         help="Set the logging level (e.g., INFO, DEBUG, WARNING). Default is INFO.",
     )
     args = parser.parse_args()
