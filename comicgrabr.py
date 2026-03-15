@@ -13,6 +13,7 @@ It performs the following key functions:
 
 This bot is designed to streamline your comic collection process, ensuring you stay up-to-date with your favorite series.
 """
+
 # Standard library imports
 import argparse  # For parsing command-line arguments
 import base64  # For encoding/decoding in Base64 (e.g., for AirDC++ auth)
@@ -166,7 +167,7 @@ def cleanup_old_logs():
 current_script_log_file_path = get_current_run_log_file_path()
 
 # File handler (outputs to a file)
-file_handler = None # Initialize to None
+file_handler = None  # Initialize to None
 try:
     file_handler = logging.FileHandler(current_script_log_file_path)
     # file_handler.setLevel(LOG_LEVEL) # Level set dynamically in main()
@@ -877,7 +878,7 @@ def search_airdcpp(comic_name, is_dry_run=False):
             )
             if not best_match:
                 best_match = comic_files[0]  # Fallback to first if no cbz
-            
+
             logger.info(
                 f"  Found match: {best_match.get('path')} (ID: {best_match.get('id')})"
             )
@@ -973,7 +974,10 @@ def download_airdcpp(file_info, session_search_id, is_dry_run=False):
         return False
     except requests.exceptions.RequestException as e:
         # Check for the specific "File exists" message in the response text
-        if e.response is not None and "File exists on the disk already" in e.response.text:
+        if (
+            e.response is not None
+            and "File exists on the disk already" in e.response.text
+        ):
             logger.info(
                 f"  Download skipped for '{target_name}': File already exists on disk or in queue. (TTH: {tth})"
             )
@@ -986,7 +990,9 @@ def download_airdcpp(file_info, session_search_id, is_dry_run=False):
             )
             return "skipped"  # Return "skipped" to indicate this specific scenario
         else:
-            logger.error(f"  Error initiating AirDC++ download for '{target_name}': {e}")
+            logger.error(
+                f"  Error initiating AirDC++ download for '{target_name}': {e}"
+            )
             send_discord_notification(
                 webhook_url=DISCORD_WEBHOOK_URL,
                 title="Error: AirDC++ Download Failed",
@@ -999,6 +1005,7 @@ def download_airdcpp(file_info, session_search_id, is_dry_run=False):
 
 # --- Main Automation Logic ---
 
+
 def log_level_type(value):
     """
     Custom type function for argparse to convert log level input to uppercase
@@ -1007,8 +1014,11 @@ def log_level_type(value):
     value = value.upper()
     valid = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
     if value not in valid:
-        raise argparse.ArgumentTypeError(f"Invalid log level: {value} (choose from {', '.join(valid)})")
+        raise argparse.ArgumentTypeError(
+            f"Invalid log level: {value} (choose from {', '.join(valid)})"
+        )
     return value
+
 
 def main():
     """
@@ -1043,20 +1053,27 @@ def main():
     )
     parser.add_argument(
         "--log-level",
-        type=log_level_type, # Use the custom type function here
+        type=log_level_type,  # Use the custom type function here
         default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], # Keep choices for help message and basic validation
+        choices=[
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ],  # Keep choices for help message and basic validation
         help="Set the logging level (e.g., INFO, DEBUG, WARNING). Default is INFO.",
     )
     args = parser.parse_args()
 
     # Set logging level based on command-line argument
-    numeric_log_level = getattr(logging, args.log_level, DEFAULT_LOG_LEVEL) # args.log_level is already uppercase now
+    numeric_log_level = getattr(
+        logging, args.log_level, DEFAULT_LOG_LEVEL
+    )  # args.log_level is already uppercase now
     logger.setLevel(numeric_log_level)
     console_handler.setLevel(numeric_log_level)
-    if file_handler: # Only set if file_handler was successfully created
+    if file_handler:  # Only set if file_handler was successfully created
         file_handler.setLevel(numeric_log_level)
-
 
     # Clean up old logs at the start of the main execution
     cleanup_old_logs()
@@ -1075,7 +1092,9 @@ def main():
         is_dry_run=args.dry_run,
     )
 
-    if not is_wednesday and not args.excel_file: # Only skip download logic if NOT Wednesday AND NOT explicitly running with --excel-file
+    if (
+        not is_wednesday and not args.excel_file
+    ):  # Only skip download logic if NOT Wednesday AND NOT explicitly running with --excel-file
         logger.info(
             f"Today is not Wednesday ({datetime.now().strftime('%A')}). Downloading and updating pull list only."
         )
@@ -1086,7 +1105,7 @@ def main():
             color=0x00BFFF,  # Deep Sky Blue
             is_dry_run=args.dry_run,
         )
-        
+
         pulled_comics_source_file = login_and_download_pull_list()
         if pulled_comics_source_file:
             json_update_success = update_json_pull_list_from_excel(
@@ -1094,15 +1113,17 @@ def main():
             )
             if json_update_success:
                 logger.info("Pull list downloaded and JSON file updated successfully.")
-                
+
                 # Load comics from the JSON file for next Wednesday's release check
-                all_comics_from_json_for_upcoming = [] 
+                all_comics_from_json_for_upcoming = []
                 if os.path.exists(PULL_LIST_DB_FILE):
                     try:
                         with open(PULL_LIST_DB_FILE, "r", encoding="utf-8") as f:
                             all_comics_from_json_for_upcoming = json.load(f)
                     except (json.JSONDecodeError, FileNotFoundError) as e:
-                        logger.error(f"Error reading or parsing {PULL_LIST_DB_FILE} for upcoming releases: {e}.")
+                        logger.error(
+                            f"Error reading or parsing {PULL_LIST_DB_FILE} for upcoming releases: {e}."
+                        )
                         send_discord_notification(
                             webhook_url=DISCORD_WEBHOOK_URL,
                             title="Error: JSON Read Failed for Upcoming",
@@ -1110,15 +1131,17 @@ def main():
                             color=0xFF0000,
                             is_dry_run=args.dry_run,
                         )
-                
+
                 # Check for next Wednesday releases even on non-Wednesday
-                _check_next_wednesday_releases(all_comics_from_json_for_upcoming, args.dry_run)
+                _check_next_wednesday_releases(
+                    all_comics_from_json_for_upcoming, args.dry_run
+                )
 
             else:
                 logger.error(
                     "Failed to update JSON pull list from downloaded Excel file."
                 )
-            
+
             try:
                 os.remove(pulled_comics_source_file)
                 logger.info(f"Cleaned up downloaded file: {pulled_comics_source_file}")
@@ -1130,7 +1153,7 @@ def main():
             logger.error(
                 "Failed to download pull list from LCG. Cannot update JSON file."
             )
-        
+
         script_end_time = datetime.now()
         script_duration = script_end_time - script_start_time
         send_discord_notification(
@@ -1143,7 +1166,7 @@ def main():
             color=0x3498DB,  # Blue color for informational end
             is_dry_run=args.dry_run,
         )
-        return # Exit if not Wednesday and not running with --excel-file
+        return  # Exit if not Wednesday and not running with --excel-file
 
     # --- Logic for Wednesday (or if --excel-file was provided) ---
     check_date = datetime.now().date()
@@ -1155,7 +1178,6 @@ def main():
         logger.info(
             f"Running with --excel-file. Processing and checking for comics as per argument."
         )
-
 
     # Determine source of pull list: downloaded file or fresh login/download
     pulled_comics_source_file = None
@@ -1211,7 +1233,7 @@ def main():
             )
 
     # If --excel-file was provided, we've just updated the JSON, so exit.
-    if args.excel_file and not is_wednesday: # Added check for is_wednesday
+    if args.excel_file and not is_wednesday:  # Added check for is_wednesday
         logger.info(
             "--- Excel file provided on non-Wednesday. JSON pull list updated. Exiting without daily download check. ---"
         )
@@ -1223,7 +1245,6 @@ def main():
             is_dry_run=args.dry_run,
         )
         return
-
 
     # --- Proceed with Daily Download Check (only if not in --excel-file mode and it IS Wednesday, or if --excel-file was used with search-past-releases) ---
     if not json_update_success:
@@ -1280,7 +1301,9 @@ def main():
                         "release_date": release_date_obj,
                     }
                 )
-        elif release_date_obj == today_date: # Only check today's releases if not searching past
+        elif (
+            release_date_obj == today_date
+        ):  # Only check today's releases if not searching past
             comics_to_search.append(
                 {
                     "series_name": comic_data.get("comic_name"),
@@ -1327,7 +1350,7 @@ def main():
 
     logger.info(f"Found {len(comics_to_search)} comics to process for download.")
     grabbed_count = 0
-    skipped_count = 0 # Added skipped count
+    skipped_count = 0  # Added skipped count
     failed_count = 0
 
     # Iterate through selected comics and attempt download via AirDC++
@@ -1347,11 +1370,13 @@ def main():
             # We no longer construct a `target_path_hint` here in the main loop,
             # as download_airdcpp will derive `target_name` from `found_match_info['name']`.
 
-            download_result = download_airdcpp( # Changed variable name to download_result
-                found_match_info, session_id_for_search, is_dry_run=args.dry_run
+            download_result = (
+                download_airdcpp(  # Changed variable name to download_result
+                    found_match_info, session_id_for_search, is_dry_run=args.dry_run
+                )
             )
 
-            if download_result is True: # Check if it's explicitly True for success
+            if download_result is True:  # Check if it's explicitly True for success
                 grabbed_count += 1
                 notification_message = (
                     f"**Queued download for:** {comic_title_full}\n"
@@ -1366,10 +1391,10 @@ def main():
                     color=0x00FF00,
                     is_dry_run=args.dry_run,
                 )
-            elif download_result == "skipped": # Check if it's "skipped"
+            elif download_result == "skipped":  # Check if it's "skipped"
                 skipped_count += 1
                 # Notification is already sent within download_airdcpp for this case
-            else: # Must be False for a general failure
+            else:  # Must be False for a general failure
                 failed_count += 1
         else:
             failed_count += 1
@@ -1389,7 +1414,7 @@ def main():
     final_message = (
         f"**Daily Run Complete!**\n"
         f"Successfully queued: {grabbed_count} comic(s)\n"
-        f"Skipped (already exists): {skipped_count} comic(s)\n" # Added skipped count to summary
+        f"Skipped (already exists): {skipped_count} comic(s)\n"  # Added skipped count to summary
         f"Failed to find/queue: {failed_count} comic(s)"
     )
     send_discord_notification(
