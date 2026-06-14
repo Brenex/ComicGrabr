@@ -685,218 +685,232 @@ def search_airdcpp(comic_name, is_dry_run=False):
         )
         return None, None  # Return None for both match and session_search_id
 
-    session_search_id = None
-    hub_search_operation_id = None
-
-    # --- Step 1: Create a search instance (POST /api/v1/search) ---
-    search_instance_create_endpoint = f"{AIRDCPP_API_URL}search"
-    initial_instance_payload = {
-        "pattern": comic_name,
-        "limit": 10,
-        "expiration": 5,
-    }  # 5 minutes expiration
-
-    logger.debug(f"  Attempting to create search instance for '{comic_name}'...")
-    try:
-        response = requests.post(
-            search_instance_create_endpoint,
-            json=initial_instance_payload,
-            headers=headers,
-            timeout=15,
-        )
-        response.raise_for_status()
-        response_json = response.json()
-        if "id" in response_json:
-            session_search_id = response_json["id"]
-            logger.info(
-                f"  Successfully created search instance. Session Search ID: {session_search_id}"
-            )
-        else:
-            logger.error(
-                "  No 'id' found in search instance creation response. Cannot proceed."
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Error: AirDC++ Search Instance Failed",
-                description=f"Error creating AirDC++ search instance for '{comic_name}'. No ID found in response.",
-                color=0xFF8C00,
-                is_dry_run=is_dry_run,
-            )
-            return None, None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"  Error creating search instance for '{comic_name}': {e}")
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Error: AirDC++ Search Instance Creation",
-            description=f"Error creating AirDC++ search instance for '{comic_name}': {e}",
-            color=0xFF0000,
-            is_dry_run=is_dry_run,
-        )
-        return None, None
-
-    # --- Step 2: Perform the Hub Search (POST /api/v1/search/{instance_id}/hub_search) ---
-    hub_search_execute_endpoint = (
-        f"{AIRDCPP_API_URL}search/{session_search_id}/hub_search"
-    )
-
-    # The 'query' field itself is an object, containing 'pattern' and optional 'file_extensions'.
-    hub_search_payload_base = {"pattern": comic_name, "limit": 10}
-
-    hub_search_payloads_to_try = [
-        {"query": {**hub_search_payload_base, "file_extensions": ["cbz"]}},
-        {"query": {**hub_search_payload_base, "file_extensions": ["cbr"]}},
-        {"query": hub_search_payload_base},  # General search fallback
+    current_year = datetime.now().year
+    patterns_to_try = [
+        f"{comic_name} {current_year}",
+        comic_name
     ]
 
-    logger.debug(
-        f"  Performing hub search for '{comic_name}' (using Session ID: {session_search_id})..."
-    )
-    for payload_attempt in hub_search_payloads_to_try:
+    last_session_search_id = None
+
+    for i, search_pattern in enumerate(patterns_to_try):
+        is_last_pattern = (i == len(patterns_to_try) - 1)
+        session_search_id = None
+        hub_search_operation_id = None
+
+        # --- Step 1: Create a search instance (POST /api/v1/search) ---
+        search_instance_create_endpoint = f"{AIRDCPP_API_URL}search"
+        initial_instance_payload = {
+            "pattern": search_pattern,
+            "limit": 10,
+            "expiration": 5,
+        }  # 5 minutes expiration
+
+        logger.debug(f"  Attempting to create search instance for '{search_pattern}'...")
         try:
-            time.sleep(
-                2
-            )  # Give a moment between creating instance and performing search
             response = requests.post(
-                hub_search_execute_endpoint,
-                json=payload_attempt,
+                search_instance_create_endpoint,
+                json=initial_instance_payload,
                 headers=headers,
-                timeout=20,
+                timeout=15,
             )
             response.raise_for_status()
             response_json = response.json()
-
-            if "search_id" in response_json:
-                hub_search_operation_id = response_json["search_id"]
-                logger.debug(
-                    f"  Hub search initiated successfully. Hub Search Operation ID: {hub_search_operation_id}"
+            
+            if "id" in response_json:
+                session_search_id = response_json["id"]
+                last_session_search_id = session_search_id
+                logger.info(
+                    f"  Successfully created search instance. Session Search ID: {session_search_id}"
                 )
-                break  # Success, proceed to step 3
             else:
-                logger.debug(
-                    f"  No 'search_id' found in hub search response for payload: {json.dumps(payload_attempt)}. Trying next."
+                logger.error(
+                    f"  No 'id' found in search instance creation response for '{search_pattern}'. Cannot proceed."
                 )
-
+                if is_last_pattern:
+                    send_discord_notification(
+                        webhook_url=DISCORD_WEBHOOK_URL,
+                        title="Error: AirDC++ Search Instance Failed",
+                        description=f"Error creating AirDC++ search instance for '{search_pattern}'. No ID found in response.",
+                        color=0xFF8C00,
+                        is_dry_run=is_dry_run,
+                    )
+                continue
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"  Error during hub search execution with payload: {json.dumps(payload_attempt)}: {e}"
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Error: AirDC++ Hub Search Execution",
-                description=f"Error during AirDC++ hub search for '{comic_name}' with payload {json.dumps(payload_attempt)}: {e}",
-                color=0xFF0000,
-                is_dry_run=is_dry_run,
-            )
+            logger.error(f"  Error creating search instance for '{search_pattern}': {e}")
+            if is_last_pattern:
+                send_discord_notification(
+                    webhook_url=DISCORD_WEBHOOK_URL,
+                    title="Error: AirDC++ Search Instance Creation",
+                    description=f"Error creating AirDC++ search instance for '{search_pattern}': {e}",
+                    color=0xFF0000,
+                    is_dry_run=is_dry_run,
+                )
             continue
 
-    if not hub_search_operation_id:
-        logger.error(
-            "  Failed to initiate hub search. No hub search operation ID obtained. Cannot proceed to get results."
+        # --- Step 2: Perform the Hub Search (POST /api/v1/search/{instance_id}/hub_search) ---
+        hub_search_execute_endpoint = (
+            f"{AIRDCPP_API_URL}search/{session_search_id}/hub_search"
         )
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Error: AirDC++ Hub Search Failed",
-            description=f"Failed to initiate AirDC++ hub search for '{comic_name}'. No operation ID obtained.",
-            color=0xFF8C00,
-            is_dry_run=is_dry_run,
-        )
-        return (
-            None,
-            session_search_id,
-        )  # Return session_search_id even if hub search failed
 
-    # --- Step 3: Retrieve Results (GET /api/v1/search/{session_id}/results/start/count) with Retries ---
-    start_index = 0
-    count_limit = 100  # Fetch up to 100 results
-    max_retries = 3
-    initial_delay = 7  # seconds
-    delay_increment = 5  # seconds
+        # The 'query' field itself is an object, containing 'pattern' and optional 'file_extensions'.
+        hub_search_payload_base = {"pattern": search_pattern, "limit": 10}
 
-    # Endpoint expects the session ID from the *first* step
-    results_fetch_endpoint = f"{AIRDCPP_API_URL}search/{session_search_id}/results/{start_index}/{count_limit}"
-
-    logger.debug(
-        f"  Fetching AirDC++ search results for '{comic_name}' (using Session Search ID: {session_search_id})..."
-    )
-
-    results = []  # Initialize results as an empty list
-
-    for attempt in range(max_retries):
-        current_delay = initial_delay + (attempt * delay_increment)
-        logger.debug(
-            f"  Waiting {current_delay} seconds before fetching results (Attempt {attempt + 1}/{max_retries})..."
-        )
-        time.sleep(current_delay)
-
-        try:
-            response = requests.get(results_fetch_endpoint, headers=headers, timeout=30)
-            response.raise_for_status()
-            results = response.json()
-
-            # If results are found (list not empty), break the retry loop
-            if isinstance(results, list) and results:
-                logger.debug(f"  Results found on attempt {attempt + 1}.")
-                break
-            else:
-                logger.debug(
-                    f"  No results found on attempt {attempt + 1}. Retrying..."
-                )
-                results = []  # Ensure it's an empty list for clarity and loop condition
-        except requests.exceptions.Timeout:
-            logger.warning(
-                f"  AirDC++ results fetching for '{comic_name}' timed out on attempt {attempt + 1}."
-            )
-            results = []  # Reset results for retry
-        except requests.exceptions.RequestException as e:
-            logger.error(
-                f"  Error fetching AirDC++ search results for '{comic_name}' on attempt {attempt + 1}: {e}"
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Error: AirDC++ Results Fetching",
-                description=f"Error fetching AirDC++ search results for '{comic_name}' on attempt {attempt + 1}: {e}",
-                color=0xFF0000,
-                is_dry_run=is_dry_run,
-            )
-            results = []  # Reset results for retry
-            # If it's a non-retriable error (e.g., 404), maybe break here? For now, keep retrying.
-
-    if isinstance(results, list) and results:
-        comic_files = [
-            r
-            for r in results
-            if r.get("path")
-            and (
-                r["path"].lower().endswith(".cbz") or r["path"].lower().endswith(".cbr")
-            )
+        hub_search_payloads_to_try = [
+            {"query": {**hub_search_payload_base, "file_extensions": ["cbz"]}},
+            {"query": {**hub_search_payload_base, "file_extensions": ["cbr"]}},
+            {"query": hub_search_payload_base},  # General search fallback
         ]
 
-        if comic_files:
-            # Prioritize .cbz over .cbr if both exist, otherwise pick first available
-            best_match = next(
-                (f for f in comic_files if f["path"].lower().endswith(".cbz")), None
-            )
-            if not best_match:
-                best_match = comic_files[0]  # Fallback to first if no cbz
+        logger.debug(
+            f"  Performing hub search for '{search_pattern}' (using Session ID: {session_search_id})..."
+        )
+        for payload_attempt in hub_search_payloads_to_try:
+            try:
+                time.sleep(
+                    2
+                )  # Give a moment between creating instance and performing search
+                response = requests.post(
+                    hub_search_execute_endpoint,
+                    json=payload_attempt,
+                    headers=headers,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                response_json = response.json()
 
-            logger.info(
-                f"  Found match: {best_match.get('path')} (ID: {best_match.get('id')})"
+                if "search_id" in response_json:
+                    hub_search_operation_id = response_json["search_id"]
+                    logger.debug(
+                        f"  Hub search initiated successfully. Hub Search Operation ID: {hub_search_operation_id}"
+                    )
+                    break  # Success, proceed to step 3
+                else:
+                    logger.debug(
+                        f"  No 'search_id' found in hub search response for payload: {json.dumps(payload_attempt)}. Trying next."
+                    )
+
+            except requests.exceptions.RequestException as e:
+                logger.error(
+                    f"  Error during hub search execution with payload: {json.dumps(payload_attempt)}: {e}"
+                )
+                if is_last_pattern:
+                    send_discord_notification(
+                        webhook_url=DISCORD_WEBHOOK_URL,
+                        title="Error: AirDC++ Hub Search Execution",
+                        description=f"Error during AirDC++ hub search for '{search_pattern}' with payload {json.dumps(payload_attempt)}: {e}",
+                        color=0xFF0000,
+                        is_dry_run=is_dry_run,
+                    )
+                continue
+
+        if not hub_search_operation_id:
+            logger.error(
+                f"  Failed to initiate hub search for '{search_pattern}'. No hub search operation ID obtained."
             )
-            return {
-                "id": best_match.get("id"),
-                "name": best_match.get("name"),  # Include name for target_name
-                "path": best_match.get("path"),
-                "size": best_match.get("size"),
-                "tth": best_match.get("tth"),  # Ensure tth is included for download
-            }, session_search_id  # Return the match and the session_search_id
+            if is_last_pattern:
+                send_discord_notification(
+                    webhook_url=DISCORD_WEBHOOK_URL,
+                    title="Error: AirDC++ Hub Search Failed",
+                    description=f"Failed to initiate AirDC++ hub search for '{search_pattern}'. No operation ID obtained.",
+                    color=0xFF8C00,
+                    is_dry_run=is_dry_run,
+                )
+            continue # Skip to the next pattern
+
+        # --- Step 3: Retrieve Results (GET /api/v1/search/{session_id}/results/start/count) with Retries ---
+        start_index = 0
+        count_limit = 100  # Fetch up to 100 results
+        max_retries = 3
+        initial_delay = 7  # seconds
+        delay_increment = 5  # seconds
+
+        # Endpoint expects the session ID from the *first* step
+        results_fetch_endpoint = f"{AIRDCPP_API_URL}search/{session_search_id}/results/{start_index}/{count_limit}"
+
+        logger.debug(
+            f"  Fetching AirDC++ search results for '{search_pattern}' (using Session Search ID: {session_search_id})..."
+        )
+
+        results = []  # Initialize results as an empty list
+
+        for attempt in range(max_retries):
+            current_delay = initial_delay + (attempt * delay_increment)
+            logger.debug(
+                f"  Waiting {current_delay} seconds before fetching results (Attempt {attempt + 1}/{max_retries})..."
+            )
+            time.sleep(current_delay)
+
+            try:
+                response = requests.get(results_fetch_endpoint, headers=headers, timeout=30)
+                response.raise_for_status()
+                results = response.json()
+
+                # If results are found (list not empty), break the retry loop
+                if isinstance(results, list) and results:
+                    logger.debug(f"  Results found on attempt {attempt + 1}.")
+                    break
+                else:
+                    logger.debug(
+                        f"  No results found on attempt {attempt + 1}. Retrying..."
+                    )
+                    results = []  # Ensure it's an empty list for clarity and loop condition
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    f"  AirDC++ results fetching for '{search_pattern}' timed out on attempt {attempt + 1}."
+                )
+                results = []  # Reset results for retry
+            except requests.exceptions.RequestException as e:
+                logger.error(
+                    f"  Error fetching AirDC++ search results for '{search_pattern}' on attempt {attempt + 1}: {e}"
+                )
+                if is_last_pattern:
+                    send_discord_notification(
+                        webhook_url=DISCORD_WEBHOOK_URL,
+                        title="Error: AirDC++ Results Fetching",
+                        description=f"Error fetching AirDC++ search results for '{search_pattern}' on attempt {attempt + 1}: {e}",
+                        color=0xFF0000,
+                        is_dry_run=is_dry_run,
+                    )
+                results = []  # Reset results for retry
+
+        if isinstance(results, list) and results:
+            comic_files = [
+                r
+                for r in results
+                if r.get("path")
+                and (
+                    r["path"].lower().endswith(".cbz") or r["path"].lower().endswith(".cbr")
+                )
+            ]
+
+            if comic_files:
+                # Prioritize .cbz over .cbr if both exist, otherwise pick first available
+                best_match = next(
+                    (f for f in comic_files if f["path"].lower().endswith(".cbz")), None
+                )
+                if not best_match:
+                    best_match = comic_files[0]  # Fallback to first if no cbz
+
+                logger.info(
+                    f"  Found match: {best_match.get('path')} (ID: {best_match.get('id')})"
+                )
+                return {
+                    "id": best_match.get("id"),
+                    "name": best_match.get("name"),  # Include name for target_name
+                    "path": best_match.get("path"),
+                    "size": best_match.get("size"),
+                    "tth": best_match.get("tth"),  # Ensure tth is included for download
+                }, session_search_id  # Return the match and the session_search_id
+            else:
+                logger.info(
+                    f"  No .cbz/.cbr file found among search results for '{search_pattern}'."
+                )
         else:
-            logger.info(
-                f"  No .cbz/.cbr file found among search results for '{comic_name}'."
-            )
-    else:
-        logger.info(f"  No search results found on AirDC++ for '{comic_name}'.")
+            logger.info(f"  No search results found on AirDC++ for '{search_pattern}'.")
 
-    return None, session_search_id  # Always return session_search_id even if no match
+    # If the loop finishes, both the prioritized and fallback search patterns yielded no valid files.
+    return None, last_session_search_id 
 
 
 def download_airdcpp(file_info, session_search_id, is_dry_run=False):
