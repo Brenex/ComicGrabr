@@ -40,7 +40,7 @@ from dotenv import load_dotenv  # For loading environment variables from a .env 
 load_dotenv()
 
 # Define log retention for the script's own log files
-LOG_RETENTION_DAYS = 7
+LOG_RETENTION_DAYS = 56
 
 # Default LOG_LEVEL. This will be overridden by command-line argument if provided.
 DEFAULT_LOG_LEVEL = logging.INFO
@@ -645,8 +645,165 @@ def get_airdcpp_auth_headers(is_dry_run=False):
         return {"Authorization": f"Bearer {token}"}
     return {}
 
+ISSUE_PATTERN = r"\d+(?:\.\d+)?[A-Za-z]*"
 
-def search_airdcpp(comic_name, is_dry_run=False):
+
+def normalize_title(text):
+    """
+    Normalize comic titles for comparison.
+
+    Examples:
+        "Dungeons & Dragons - Ravenloft"
+        "Dungeons and Dragons Ravenloft"
+
+    become effectively equivalent.
+    """
+    text = unicodedata.normalize("NFKD", str(text)).casefold()
+
+    # Treat & and "and" equivalently
+    text = text.replace("&", " and ")
+
+    # Normalize punctuation/dashes
+    text = re.sub(r"[’'`:–—_\-]+", " ", text)
+
+    # Remove remaining punctuation
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+
+    return " ".join(text.split())
+
+
+def normalize_issue(issue):
+    """
+    Normalize issue numbers.
+
+    001 -> 1
+    019 -> 19
+    1A  -> 1a
+    1.1 -> 1.1
+    """
+    issue = str(issue).strip().casefold()
+
+    match = re.fullmatch(r"0*(\d+)(.*)", issue)
+    if not match:
+        return issue
+
+    number = str(int(match.group(1)))
+    suffix = match.group(2)
+
+    return number + suffix
+
+
+def parse_requested_comic(comic_name):
+    """
+    Split an LCG comic name into series title and issue number.
+
+    "Absolute Flash 19"
+        -> ("Absolute Flash", "19")
+
+    "X-Men 37"
+        -> ("X-Men", "37")
+    """
+    match = re.match(
+        rf"^(?P<title>.+?)\s+#?(?P<issue>{ISSUE_PATTERN})\s*$",
+        comic_name,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return {
+        "title": match.group("title").strip(),
+        "issue": normalize_issue(match.group("issue")),
+    }
+
+
+def parse_result_filename(path):
+    """
+    Parse common scene/comic filenames.
+
+    Example:
+
+    Absolute Flash 018 (2026) (Digital) (F) (Shan-Empire).cbz
+
+        title = Absolute Flash
+        issue = 18
+        year  = 2026
+    """
+    filename = PurePosixPath(path).stem
+
+    match = re.match(
+        rf"^(?P<title>.+?)\s+#?(?P<issue>{ISSUE_PATTERN})"
+        rf"\s*\((?P<year>(?:19|20)\d{{2}})\)",
+        filename,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return {
+        "title": match.group("title").strip(),
+        "issue": normalize_issue(match.group("issue")),
+        "year": int(match.group("year")),
+    }
+
+
+def validate_comic_result(comic_name, result_path, expected_year):
+    """
+    Validate an AirDC++ result against the requested comic.
+
+    Returns:
+        (score, reason)
+
+    score is None when the candidate should be rejected.
+    """
+
+    requested = parse_requested_comic(comic_name)
+    candidate = parse_result_filename(result_path)
+
+    if requested is None:
+        return None, f"Unable to parse requested comic: {comic_name}"
+
+    if candidate is None:
+        return None, "Unable to parse candidate filename"
+
+    # HARD GATE #1: exact issue number
+    if candidate["issue"] != requested["issue"]:
+        return (
+            None,
+            f"Issue mismatch: wanted {requested['issue']}, "
+            f"found {candidate['issue']}",
+        )
+
+    # HARD GATE #2: year
+    if candidate["year"] != expected_year:
+        return (
+            None,
+            f"Year mismatch: wanted {expected_year}, "
+            f"found {candidate['year']}",
+        )
+
+    requested_title = normalize_title(requested["title"])
+    candidate_title = normalize_title(candidate["title"])
+
+    similarity = SequenceMatcher(
+        None,
+        requested_title,
+        candidate_title,
+    ).ratio()
+
+    # HARD GATE #3: title similarity
+    if similarity < 0.80:
+        return (
+            None,
+            f"Title mismatch: similarity {similarity:.2f} "
+            f"('{requested['title']}' vs '{candidate['title']}')",
+        )
+
+    return similarity, "Valid match"
+
+def search_airdcpp(comic_name, expected_year, is_dry_run=False):
     """
     Performs the three-step AirDC++ search process:
     1. Creates a search instance.
@@ -685,10 +842,8 @@ def search_airdcpp(comic_name, is_dry_run=False):
         )
         return None, None  # Return None for both match and session_search_id
 
-    current_year = datetime.now().year
     patterns_to_try = [
-        f"{comic_name} {current_year}",
-        comic_name
+        f"{comic_name} {expected_year}",
     ]
 
     last_session_search_id = None
@@ -885,12 +1040,61 @@ def search_airdcpp(comic_name, is_dry_run=False):
             ]
 
             if comic_files:
-                # Prioritize .cbz over .cbr if both exist, otherwise pick first available
-                best_match = next(
-                    (f for f in comic_files if f["path"].lower().endswith(".cbz")), None
+                valid_matches = []
+
+                for candidate in comic_files:
+                    score, reason = validate_comic_result(
+                        comic_name,
+                        candidate["path"],
+                        expected_year,
+                    )
+
+                    if score is None:
+                        logger.info(
+                            f"  Rejected candidate: {candidate['path']} "
+                            f"({reason})"
+                        )
+                        continue
+
+                    logger.info(
+                        f"  Valid candidate: {candidate['path']} "
+                        f"(title score: {score:.2f})"
+                    )
+
+                    # Slight preference for CBZ when otherwise equivalent
+                    cbz_bonus = 0.01 if candidate["path"].lower().endswith(".cbz") else 0
+
+                    valid_matches.append(
+                        (score + cbz_bonus, candidate)
+                    )
+
+                if valid_matches:
+                    valid_matches.sort(
+                        key=lambda item: item[0],
+                        reverse=True,
+                    )
+
+                    best_score, best_match = valid_matches[0]
+
+                    logger.info(
+                        f"  Selected validated match: "
+                        f"{best_match.get('path')} "
+                        f"(score: {best_score:.2f}, "
+                        f"ID: {best_match.get('id')})"
+                    )
+
+                    return {
+                        "id": best_match.get("id"),
+                        "name": best_match.get("name"),
+                        "path": best_match.get("path"),
+                        "size": best_match.get("size"),
+                        "tth": best_match.get("tth"),
+                    }, session_search_id
+
+                logger.info(
+                    f"  Search returned comic files, but none passed validation "
+                    f"for '{comic_name}'."
                 )
-                if not best_match:
-                    best_match = comic_files[0]  # Fallback to first if no cbz
 
                 logger.info(
                     f"  Found match: {best_match.get('path')} (ID: {best_match.get('id')})"
@@ -1376,7 +1580,9 @@ def main():
 
         # search_airdcpp now returns a tuple: (found_match_info, session_search_id)
         found_match_info, session_id_for_search = search_airdcpp(
-            comic_title_full, is_dry_run=args.dry_run
+            comic_title_full,
+            expected_year=comic["release_date"].year,
+            is_dry_run=args.dry_run,
         )
 
         if found_match_info and session_id_for_search:  # Ensure both are returned
