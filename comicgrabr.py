@@ -20,9 +20,13 @@ import base64  # For encoding/decoding in Base64 (e.g., for AirDC++ auth)
 import json  # For file operations using JSON
 import logging  # For logging functionality
 import os  # For interacting with the operating system
+import re  # For regular-expression parsing and validation of comic titles/issues
 import sys  # For interacting with the system (e.g., stdout for logging)
 import time  # For delays and timing
+import unicodedata  # For normalizing Unicode characters in comic titles
 from datetime import datetime, timedelta  # For handling dates and times
+from difflib import SequenceMatcher  # For comparing normalized comic title similarity
+from pathlib import PurePosixPath  # For safely extracting filenames from AirDC++ paths
 
 # Third-party imports
 import pandas as pd  # For data manipulation and analysis
