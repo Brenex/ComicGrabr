@@ -1392,94 +1392,94 @@ def main():
         )
         return  # Exit if not Wednesday and not running with --excel-file
 
-# --- Logic for Wednesday, --excel-file, or --search-past-releases ---
-check_date = datetime.now().date()
+    # --- Logic for Wednesday, --excel-file, or --search-past-releases ---
+    check_date = datetime.now().date()
 
-if args.search_past_releases:
-    logger.info(
-        "Running with --search-past-releases. "
-        "Searching existing pull_list.json without refreshing from LCG."
-    )
-elif is_wednesday:
-    logger.info(
-        f"Today is Wednesday. Checking for comics released on: "
-        f"{check_date.strftime('%Y-%m-%d')}"
-    )
-elif args.excel_file:
-    logger.info(
-        "Running with --excel-file. Processing provided pull list."
-    )
-
-# Determine source of pull list
-pulled_comics_source_file = None
-file_was_downloaded = False
-
-if args.search_past_releases:
-    # Historical search mode:
-    # Use the existing pull_list.json exactly as-is.
-    #
-    # Do NOT refresh from LCG first because update_json_pull_list_from_excel()
-    # intentionally removes comics whose release dates are older than today.
-    logger.info(
-        "--search-past-releases enabled. "
-        "Using existing pull_list.json without refreshing from LCG."
-    )
-
-    # No Excel file is needed in this mode.
-    pulled_comics_source_file = None
-
-    # Mark the "update" stage successful because we're deliberately
-    # skipping the LCG synchronization.
-    json_update_success = True
-
-elif args.excel_file:
-    if os.path.exists(args.excel_file):
-        pulled_comics_source_file = args.excel_file
+    if args.search_past_releases:
         logger.info(
-            f"Using provided Excel file: {pulled_comics_source_file}"
+            "Running with --search-past-releases. "
+            "Searching existing pull_list.json without refreshing from LCG."
         )
-        file_was_downloaded = False
+    elif is_wednesday:
+        logger.info(
+            f"Today is Wednesday. Checking for comics released on: "
+            f"{check_date.strftime('%Y-%m-%d')}"
+        )
+    elif args.excel_file:
+        logger.info(
+            "Running with --excel-file. Processing provided pull list."
+        )
+
+    # Determine source of pull list
+    pulled_comics_source_file = None
+    file_was_downloaded = False
+
+    if args.search_past_releases:
+        # Historical search mode:
+        # Use the existing pull_list.json exactly as-is.
+        #
+        # Do NOT refresh from LCG first because update_json_pull_list_from_excel()
+        # intentionally removes comics whose release dates are older than today.
+        logger.info(
+            "--search-past-releases enabled. "
+            "Using existing pull_list.json without refreshing from LCG."
+        )
+
+        # No Excel file is needed in this mode.
+        pulled_comics_source_file = None
+
+        # Mark the "update" stage successful because we're deliberately
+        # skipping the LCG synchronization.
+        json_update_success = True
+
+    elif args.excel_file:
+        if os.path.exists(args.excel_file):
+            pulled_comics_source_file = args.excel_file
+            logger.info(
+                f"Using provided Excel file: {pulled_comics_source_file}"
+            )
+            file_was_downloaded = False
+
+        else:
+            logger.error(
+                f"Error: Provided Excel file '{args.excel_file}' not found. "
+                "Proceeding with fresh download."
+            )
+
+            pulled_comics_source_file = login_and_download_pull_list()
+
+            if pulled_comics_source_file:
+                file_was_downloaded = True
 
     else:
-        logger.error(
-            f"Error: Provided Excel file '{args.excel_file}' not found. "
-            "Proceeding with fresh download."
-        )
-
+        # Normal Wednesday operation:
+        # download a fresh pull list from League of Comic Geeks.
         pulled_comics_source_file = login_and_download_pull_list()
 
         if pulled_comics_source_file:
             file_was_downloaded = True
 
-else:
-    # Normal Wednesday operation:
-    # download a fresh pull list from League of Comic Geeks.
-    pulled_comics_source_file = login_and_download_pull_list()
 
-    if pulled_comics_source_file:
-        file_was_downloaded = True
+    # ------------------------------------------------------------
+    # Update pull_list.json only during normal/Excel operation.
+    #
+    # --search-past-releases deliberately skips this entire block
+    # so historical entries are not deleted before they are searched.
+    # ------------------------------------------------------------
+    if not args.search_past_releases:
 
-
-# ------------------------------------------------------------
-# Update pull_list.json only during normal/Excel operation.
-#
-# --search-past-releases deliberately skips this entire block
-# so historical entries are not deleted before they are searched.
-# ------------------------------------------------------------
-if not args.search_past_releases:
-
-    if not pulled_comics_source_file:
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Critical Error: LCG Pull List Failed",
-            description=(
-                "Could not obtain LCG pull list "
-                "(no file provided or download failed). Exiting."
-            ),
-            color=0xFF0000,
-            is_dry_run=args.dry_run,
-        )
-        return
+        if not pulled_comics_source_file:
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="Critical Error: LCG Pull List Failed",
+                description=(
+                    "Could not obtain LCG pull list "
+                    "(no file provided or download failed). Exiting."
+                ),
+                color=0xFF0000,
+                is_dry_run=args.dry_run,
+            )
+            return
 
     # Normal mode: synchronize from LCG before searching.
     json_update_success = update_json_pull_list_from_excel(
