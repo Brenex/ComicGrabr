@@ -1392,66 +1392,93 @@ def main():
         )
         return  # Exit if not Wednesday and not running with --excel-file
 
-    # --- Logic for Wednesday (or if --excel-file was provided) ---
-    check_date = datetime.now().date()
-    if is_wednesday:
-        logger.info(
-            f"Today is Wednesday. Checking for comics released on: {check_date.strftime('%Y-%m-%d')}"
-        )
-    else:
-        logger.info(
-            f"Running with --excel-file. Processing and checking for comics as per argument."
-        )
+# --- Logic for Wednesday, --excel-file, or --search-past-releases ---
+check_date = datetime.now().date()
 
-    # Determine source of pull list: downloaded file or fresh login/download
-    pulled_comics_source_file = None
-    file_was_downloaded = (
-        False  # Flag to know if we should delete the temporary Excel file
+if args.search_past_releases:
+    logger.info(
+        "Running with --search-past-releases. "
+        "Searching existing pull_list.json without refreshing from LCG."
+    )
+elif is_wednesday:
+    logger.info(
+        f"Today is Wednesday. Checking for comics released on: "
+        f"{check_date.strftime('%Y-%m-%d')}"
+    )
+elif args.excel_file:
+    logger.info(
+        "Running with --excel-file. Processing provided pull list."
     )
 
-    if args.search_past_releases:
-        # Historical search mode:
-        # use the existing pull_list.json exactly as-is.
-        # Do NOT refresh from LCG first, because the LCG sync intentionally
-        # removes releases older than today.
-        logger.info(
-            "--search-past-releases enabled. "
-            "Using existing pull_list.json without refreshing from LCG."
-        )
-        pulled_comics_source_file = None
-        json_update_success = True
+# Determine source of pull list
+pulled_comics_source_file = None
+file_was_downloaded = False
 
-    elif args.excel_file:
-        if os.path.exists(args.excel_file):
-            pulled_comics_source_file = args.excel_file
-            logger.info(f"Using provided Excel file: {pulled_comics_source_file}")
-            file_was_downloaded = False
-        else:
-            logger.error(
-                f"Error: Provided Excel file '{args.excel_file}' not found. "
-                "Proceeding with fresh download."
-            )
-            pulled_comics_source_file = login_and_download_pull_list()
-            if pulled_comics_source_file:
-                file_was_downloaded = True
+if args.search_past_releases:
+    # Historical search mode:
+    # Use the existing pull_list.json exactly as-is.
+    #
+    # Do NOT refresh from LCG first because update_json_pull_list_from_excel()
+    # intentionally removes comics whose release dates are older than today.
+    logger.info(
+        "--search-past-releases enabled. "
+        "Using existing pull_list.json without refreshing from LCG."
+    )
+
+    # No Excel file is needed in this mode.
+    pulled_comics_source_file = None
+
+    # Mark the "update" stage successful because we're deliberately
+    # skipping the LCG synchronization.
+    json_update_success = True
+
+elif args.excel_file:
+    if os.path.exists(args.excel_file):
+        pulled_comics_source_file = args.excel_file
+        logger.info(
+            f"Using provided Excel file: {pulled_comics_source_file}"
+        )
+        file_was_downloaded = False
 
     else:
+        logger.error(
+            f"Error: Provided Excel file '{args.excel_file}' not found. "
+            "Proceeding with fresh download."
+        )
+
         pulled_comics_source_file = login_and_download_pull_list()
+
         if pulled_comics_source_file:
             file_was_downloaded = True
 
-    if not args.search_past_releases:
-        if not pulled_comics_source_file:
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Critical Error: LCG Pull List Failed",
-                description=(
-                    "Could not obtain LCG pull list "
-                    "(no file provided or download failed). Exiting."
-                ),
-                color=0xFF0000,
-                is_dry_run=args.dry_run,
-            )
+else:
+    # Normal Wednesday operation:
+    # download a fresh pull list from League of Comic Geeks.
+    pulled_comics_source_file = login_and_download_pull_list()
+
+    if pulled_comics_source_file:
+        file_was_downloaded = True
+
+
+# ------------------------------------------------------------
+# Update pull_list.json only during normal/Excel operation.
+#
+# --search-past-releases deliberately skips this entire block
+# so historical entries are not deleted before they are searched.
+# ------------------------------------------------------------
+if not args.search_past_releases:
+
+    if not pulled_comics_source_file:
+        send_discord_notification(
+            webhook_url=DISCORD_WEBHOOK_URL,
+            title="Critical Error: LCG Pull List Failed",
+            description=(
+                "Could not obtain LCG pull list "
+                "(no file provided or download failed). Exiting."
+            ),
+            color=0xFF0000,
+            is_dry_run=args.dry_run,
+        )
         return
 
     # Normal mode: synchronize from LCG before searching.
@@ -1459,14 +1486,23 @@ def main():
         pulled_comics_source_file
     )
 
-    # Clean up the downloaded file if it was downloaded in this run
-    if file_was_downloaded and os.path.exists(pulled_comics_source_file):
+    # Clean up the downloaded temporary Excel file if this run
+    # downloaded it from League of Comic Geeks.
+    if (
+        file_was_downloaded
+        and pulled_comics_source_file
+        and os.path.exists(pulled_comics_source_file)
+    ):
         try:
             os.remove(pulled_comics_source_file)
-            logger.info(f"Cleaned up downloaded file: {pulled_comics_source_file}")
+            logger.info(
+                f"Cleaned up downloaded file: "
+                f"{pulled_comics_source_file}"
+            )
         except Exception as e:
             logger.warning(
-                f"Warning: Could not remove temporary file {pulled_comics_source_file}: {e}"
+                f"Warning: Could not remove temporary file "
+                f"{pulled_comics_source_file}: {e}"
             )
 
     # If --excel-file was provided, we've just updated the JSON, so exit.
