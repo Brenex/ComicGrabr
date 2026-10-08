@@ -1099,17 +1099,6 @@ def search_airdcpp(comic_name, expected_year, is_dry_run=False):
                     f"  Search returned comic files, but none passed validation "
                     f"for '{comic_name}'."
                 )
-
-                logger.info(
-                    f"  Found match: {best_match.get('path')} (ID: {best_match.get('id')})"
-                )
-                return {
-                    "id": best_match.get("id"),
-                    "name": best_match.get("name"),  # Include name for target_name
-                    "path": best_match.get("path"),
-                    "size": best_match.get("size"),
-                    "tth": best_match.get("tth"),  # Ensure tth is included for download
-                }, session_search_id  # Return the match and the session_search_id
             else:
                 logger.info(
                     f"  No .cbz/.cbr file found among search results for '{search_pattern}'."
