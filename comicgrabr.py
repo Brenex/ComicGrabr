@@ -1315,8 +1315,10 @@ def main():
     )
 
     if (
-        not is_wednesday and not args.excel_file
-    ):  # Only skip download logic if NOT Wednesday AND NOT explicitly running with --excel-file
+        not is_wednesday
+        and not args.excel_file
+        and not args.search_past_releases
+    ):
         logger.info(
             f"Today is not Wednesday ({datetime.now().strftime('%A')}). Downloading and updating pull list only."
         )
@@ -1407,42 +1409,55 @@ def main():
         False  # Flag to know if we should delete the temporary Excel file
     )
 
-    if args.excel_file:
+    if args.search_past_releases:
+        # Historical search mode:
+        # use the existing pull_list.json exactly as-is.
+        # Do NOT refresh from LCG first, because the LCG sync intentionally
+        # removes releases older than today.
+        logger.info(
+            "--search-past-releases enabled. "
+            "Using existing pull_list.json without refreshing from LCG."
+        )
+        pulled_comics_source_file = None
+        json_update_success = True
+
+    elif args.excel_file:
         if os.path.exists(args.excel_file):
             pulled_comics_source_file = args.excel_file
             logger.info(f"Using provided Excel file: {pulled_comics_source_file}")
-            file_was_downloaded = False  # Not downloaded in this run
+            file_was_downloaded = False
         else:
             logger.error(
-                f"Error: Provided Excel file '{args.excel_file}' not found. Proceeding with fresh download."
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Warning: Excel File Not Found",
-                description=f"Provided Excel file '{args.excel_file}' not found. Attempting fresh download.",
-                color=0xFF8C00,
-                is_dry_run=args.dry_run,
+                f"Error: Provided Excel file '{args.excel_file}' not found. "
+                "Proceeding with fresh download."
             )
             pulled_comics_source_file = login_and_download_pull_list()
             if pulled_comics_source_file:
                 file_was_downloaded = True
+
     else:
         pulled_comics_source_file = login_and_download_pull_list()
         if pulled_comics_source_file:
             file_was_downloaded = True
 
-    if not pulled_comics_source_file:
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Critical Error: LCG Pull List Failed",
-            description="Could not obtain LCG pull list (no file provided or download failed). Exiting.",
-            color=0xFF0000,
-            is_dry_run=args.dry_run,
-        )
+    if not args.search_past_releases:
+        if not pulled_comics_source_file:
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="Critical Error: LCG Pull List Failed",
+                description=(
+                    "Could not obtain LCG pull list "
+                    "(no file provided or download failed). Exiting."
+                ),
+                color=0xFF0000,
+                is_dry_run=args.dry_run,
+            )
         return
 
-    # Process the Excel file and update the JSON pull list file
-    json_update_success = update_json_pull_list_from_excel(pulled_comics_source_file)
+    # Normal mode: synchronize from LCG before searching.
+    json_update_success = update_json_pull_list_from_excel(
+        pulled_comics_source_file
+    )
 
     # Clean up the downloaded file if it was downloaded in this run
     if file_was_downloaded and os.path.exists(pulled_comics_source_file):
