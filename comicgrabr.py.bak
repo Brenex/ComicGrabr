@@ -4,18 +4,14 @@ Comic Grabber Bot
 
 This script automates the process of managing a comic pull list and downloading released comics.
 It performs the following key functions:
-1.  **League of Comic Geeks (LCG) Integration**: Logs into your LCG account to download the latest pull list in Excel format.
-2.  **Local Pull List Management**: Parses the downloaded Excel file and maintains `pull_list.json` with current and upcoming comic releases.
-3.  **Persistent Retry Queue**: Stores unresolved releases in `retry_list.json` so failed searches/downloads survive future pull-list refreshes. Retry entries are automatically removed when a comic is successfully queued or AirDC++ reports that it already exists.
-4.  **AirDC++ Search and Download**: Searches AirDC++ hubs for release-day comics and unresolved retry entries, validates candidate title/issue/year data, and queues valid files for download.
-5.  **Automatic Retry Processing**: Processes `retry_list.json` on normal runs, including non-Wednesdays, so missing comics are retried without changing their original publication dates.
-6.  **Discord Notifications**: Sends detailed notifications to a configured Discord webhook about script status, errors, queued downloads, already-existing comics, and upcoming releases.
-7.  **Logging**: Outputs high-level information to the console and detailed information to timestamped log files, with automatic cleanup of old logs.
-8.  **Command-Line Arguments**: Supports Excel-file synchronization, manual retry-only runs, dry runs, and configurable logging levels.
+1.  **League of Comic Geeks (LCG) Integration**: Logs into your LCG account to download your latest pull list in Excel format.
+2.  **Local Pull List Management**: Parses the downloaded Excel file and updates a local JSON database ('pull_list.json') with upcoming comic releases, while removing past releases.
+3.  **AirDC++ Search and Download**: For comics released on the current day (or specified past dates via argument), it searches for corresponding files on AirDC++ hubs and queues them for download.
+4.  **Discord Notifications**: Sends detailed notifications to a configured Discord webhook about script status (start, completion, errors), queued downloads, and upcoming comic releases for the next Wednesday.
+5.  **Logging**: Implements a robust logging system that outputs high-level information to the console and detailed debug information to timestamped log files, with automatic cleanup of old logs.
+6.  **Command-Line Arguments**: Supports various operational modes, including processing a specific Excel file (for initial setup or manual updates), searching for past releases, and performing dry runs without initiating actual downloads.
 
-The retry queue is intentionally separate from the LCG pull list. `pull_list.json` may be refreshed
-and prune old release dates, while `retry_list.json` persists only unresolved comics until they are
-successfully found/queued or confirmed to already exist.
+This bot is designed to streamline your comic collection process, ensuring you stay up-to-date with your favorite series.
 """
 
 # Standard library imports
@@ -78,8 +74,7 @@ AIRDCPP_INSTANCE_ID = os.getenv(
 LOGIN_URL = "https://leagueofcomicgeeks.com/login"
 EXPORT_URL = "https://leagueofcomicgeeks.com/member/export_pulls"
 OUTPUT_FILENAME = "league_of_comic_geeks_pulls.xls"  # Temporary LCG export file
-PULL_LIST_DB_FILE = "pull_list.json"  # The JSON file to store the current/upcoming LCG pull list
-RETRY_LIST_DB_FILE = "retry_list.json"  # Persistent queue containing only unresolved comics
+PULL_LIST_DB_FILE = "pull_list.json"  # The JSON file to store your pull list
 # DOWNLOADED_TTHS_FILE = "downloaded_tths.json" # Removed - No longer needed
 
 # User-Agent header to mimic a web browser
@@ -560,368 +555,6 @@ def update_json_pull_list_from_excel(excel_file_path):
             color=0xFF0000,
         )
         return False
-
-
-
-# --- Retry List Management ---
-
-
-def _retry_key(comic_name, release_date):
-    """
-    Build a stable key for identifying a comic in the retry queue.
-
-    The original release date is part of the key so the same series/issue text can
-    safely coexist with another entry if LCG ever supplies a corrected/revised date.
-
-    Args:
-        comic_name (str): Comic name including issue number.
-        release_date (str or datetime.date): Original publication/release date.
-
-    Returns:
-        tuple: `(comic_name, release_date_string)` suitable for comparisons/deduping.
-    """
-    if hasattr(release_date, "strftime"):
-        release_date = release_date.strftime("%Y-%m-%d")
-
-    return str(comic_name).strip(), str(release_date).strip()
-
-
-def load_retry_list():
-    """
-    Load unresolved comics from `retry_list.json`.
-
-    Missing retry files are treated as an empty queue. Malformed top-level JSON is
-    reported and also treated as empty rather than crashing the entire comic run.
-
-    Returns:
-        list: Retry-entry dictionaries. Each valid entry includes at least
-              `comic_name` and `release_date`.
-    """
-    if not os.path.exists(RETRY_LIST_DB_FILE):
-        logger.debug(
-            f"Retry list '{RETRY_LIST_DB_FILE}' does not exist yet. Starting with an empty retry queue."
-        )
-        return []
-
-    try:
-        with open(RETRY_LIST_DB_FILE, "r", encoding="utf-8") as f:
-            retry_list = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error(f"Error reading or parsing {RETRY_LIST_DB_FILE}: {e}")
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Error: Retry List Read Failed",
-            description=f"Could not read or parse `{RETRY_LIST_DB_FILE}`: {e}",
-            color=0xFF0000,
-        )
-        return []
-
-    if not isinstance(retry_list, list):
-        logger.error(
-            f"Retry list '{RETRY_LIST_DB_FILE}' must contain a JSON list. Ignoring invalid contents."
-        )
-        return []
-
-    # Keep only entries with the two fields required for searching. Additional
-    # metadata fields are preserved exactly as stored.
-    valid_entries = []
-    for entry in retry_list:
-        if not isinstance(entry, dict):
-            logger.warning(f"Ignoring malformed retry entry: {entry!r}")
-            continue
-
-        comic_name = entry.get("comic_name")
-        release_date = entry.get("release_date")
-        if not comic_name or not release_date:
-            logger.warning(f"Ignoring incomplete retry entry: {entry!r}")
-            continue
-
-        try:
-            datetime.strptime(str(release_date), "%Y-%m-%d")
-        except ValueError:
-            logger.warning(
-                f"Ignoring retry entry with invalid release date '{release_date}': {comic_name}"
-            )
-            continue
-
-        valid_entries.append(entry)
-
-    return valid_entries
-
-
-def save_retry_list(retry_list, is_dry_run=False):
-    """
-    Persist the retry queue to disk using an atomic file replacement.
-
-    An empty retry queue is intentionally written as `[]` rather than deleting the
-    file. This makes it immediately obvious that the queue exists and is empty.
-
-    Args:
-        retry_list (list): Retry-entry dictionaries to save.
-        is_dry_run (bool, optional): If True, do not change the retry file.
-
-    Returns:
-        bool: True when the queue was saved (or intentionally skipped in dry-run
-              mode), otherwise False.
-    """
-    if is_dry_run:
-        logger.debug(
-            f"[DRY RUN] Would save {len(retry_list)} entr{'y' if len(retry_list) == 1 else 'ies'} to {RETRY_LIST_DB_FILE}."
-        )
-        return True
-
-    # Sort for predictable, human-readable JSON. Metadata remains attached to its
-    # original comic entry.
-    retry_list.sort(
-        key=lambda item: (
-            item.get("release_date", "9999-12-31"),
-            item.get("comic_name", ""),
-        )
-    )
-
-    temp_path = f"{RETRY_LIST_DB_FILE}.tmp"
-    try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(retry_list, f, indent=4, ensure_ascii=False)
-
-        # os.replace() is atomic on the same filesystem and prevents a partially
-        # written retry database if the process is interrupted during the write.
-        os.replace(temp_path, RETRY_LIST_DB_FILE)
-        logger.info(
-            f"Retry list saved: {len(retry_list)} pending comic(s) in {RETRY_LIST_DB_FILE}."
-        )
-        return True
-    except OSError as e:
-        logger.error(f"Error saving retry list '{RETRY_LIST_DB_FILE}': {e}")
-        send_discord_notification(
-            webhook_url=DISCORD_WEBHOOK_URL,
-            title="Error: Retry List Write Failed",
-            description=f"Could not save `{RETRY_LIST_DB_FILE}`: {e}",
-            color=0xFF0000,
-        )
-        return False
-    finally:
-        # If the atomic replacement failed before completion, remove the temporary
-        # file so stale `.tmp` files do not accumulate.
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
-
-def add_or_update_retry(retry_list, comic, failure_reason, is_dry_run=False):
-    """
-    Add a failed comic to the retry queue or update its existing retry metadata.
-
-    The original publication date is never changed. Instead, failures are tracked
-    independently with retry counters/timestamps so future LCG pull-list refreshes
-    cannot erase unresolved comics.
-
-    Args:
-        retry_list (list): In-memory retry queue.
-        comic (dict): Processing dictionary containing `series_name` and
-                      `release_date` (a date object).
-        failure_reason (str): Short machine/human-readable description of why the
-                              comic remains unresolved.
-        is_dry_run (bool, optional): If True, do not mutate or save retry state.
-
-    Returns:
-        bool: True when retry state was updated/saved, False otherwise.
-    """
-    comic_name = comic["series_name"]
-    release_date = comic["release_date"]
-    key = _retry_key(comic_name, release_date)
-    now_string = datetime.now().isoformat(timespec="seconds")
-
-    if is_dry_run:
-        logger.info(
-            f"[DRY RUN] Would add/update retry entry for {comic_name} ({key[1]}): {failure_reason}"
-        )
-        return True
-
-    for entry in retry_list:
-        if _retry_key(entry.get("comic_name"), entry.get("release_date")) == key:
-            entry["retry_count"] = int(entry.get("retry_count", 0)) + 1
-            entry["last_attempt_at"] = now_string
-            entry["last_failure_reason"] = failure_reason
-            logger.info(
-                f"Updated retry entry for {comic_name} ({key[1]}). "
-                f"Retry count: {entry['retry_count']}. Reason: {failure_reason}"
-            )
-            return save_retry_list(retry_list)
-
-    retry_entry = {
-        "comic_name": comic_name,
-        "release_date": key[1],
-        "retry_count": 1,
-        "first_failed_at": now_string,
-        "last_attempt_at": now_string,
-        "last_failure_reason": failure_reason,
-    }
-    retry_list.append(retry_entry)
-    logger.info(
-        f"Added {comic_name} ({key[1]}) to retry list. Reason: {failure_reason}"
-    )
-    return save_retry_list(retry_list)
-
-
-def remove_from_retry_list(retry_list, comic, resolution, is_dry_run=False):
-    """
-    Remove a resolved comic from the retry queue.
-
-    A comic is considered resolved when its download is successfully queued or
-    AirDC++ reports that the same file already exists on disk/in the download queue.
-
-    Args:
-        retry_list (list): In-memory retry queue.
-        comic (dict): Processing dictionary containing `series_name` and
-                      `release_date`.
-        resolution (str): Description used in the log (for example, `queued` or
-                          `already exists`).
-        is_dry_run (bool, optional): If True, do not mutate or save retry state.
-
-    Returns:
-        bool: True if an entry was removed, False if no matching retry entry was
-              present (or if running in dry-run mode).
-    """
-    comic_name = comic["series_name"]
-    key = _retry_key(comic_name, comic["release_date"])
-
-    matching_indexes = [
-        index
-        for index, entry in enumerate(retry_list)
-        if _retry_key(entry.get("comic_name"), entry.get("release_date")) == key
-    ]
-
-    if not matching_indexes:
-        return False
-
-    if is_dry_run:
-        logger.info(
-            f"[DRY RUN] Would remove resolved retry entry for {comic_name} ({key[1]}): {resolution}"
-        )
-        return False
-
-    # Remove every duplicate matching entry defensively, even though normal writes
-    # keep the queue deduplicated by comic name + release date.
-    retry_list[:] = [
-        entry
-        for entry in retry_list
-        if _retry_key(entry.get("comic_name"), entry.get("release_date")) != key
-    ]
-
-    logger.info(
-        f"Resolved retry entry for {comic_name} ({key[1]}): {resolution}. Removed from {RETRY_LIST_DB_FILE}."
-    )
-    save_retry_list(retry_list)
-    return True
-
-
-def load_pull_list():
-    """
-    Load the current/upcoming pull list from `pull_list.json`.
-
-    Returns:
-        list: Comic dictionaries from the pull-list database, or an empty list if
-              the file is missing/unreadable.
-    """
-    if not os.path.exists(PULL_LIST_DB_FILE):
-        logger.warning(
-            f"JSON pull list file '{PULL_LIST_DB_FILE}' not found."
-        )
-        return []
-
-    try:
-        with open(PULL_LIST_DB_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error(f"Error reading or parsing {PULL_LIST_DB_FILE}: {e}")
-        return []
-
-    if not isinstance(data, list):
-        logger.error(f"{PULL_LIST_DB_FILE} must contain a JSON list.")
-        return []
-
-    return data
-
-
-def build_comics_to_process(pull_list, retry_list, today_date, include_today_releases):
-    """
-    Build a deduplicated work list from today's releases and unresolved retries.
-
-    Retry entries are always eligible because they represent unresolved work. Today's
-    pull-list releases are included only when `include_today_releases` is True (the
-    normal Wednesday behavior). If the same comic exists in both sources, it is
-    processed once and marked as coming from both sources.
-
-    Args:
-        pull_list (list): Current/upcoming LCG pull-list entries.
-        retry_list (list): Persistent unresolved retry entries.
-        today_date (datetime.date): Current local date.
-        include_today_releases (bool): Whether today's pull-list releases should be
-                                       included alongside retries.
-
-    Returns:
-        list: Processing dictionaries containing `series_name`, `release_date`, and
-              `source`.
-    """
-    comics_map = {}
-
-    if include_today_releases:
-        for comic_data in pull_list:
-            try:
-                release_date_obj = datetime.strptime(
-                    comic_data.get("release_date", ""), "%Y-%m-%d"
-                ).date()
-            except (TypeError, ValueError):
-                logger.warning(
-                    f"Skipping pull-list entry with invalid release date: {comic_data!r}"
-                )
-                continue
-
-            if release_date_obj != today_date:
-                continue
-
-            comic_name = comic_data.get("comic_name")
-            if not comic_name:
-                continue
-
-            key = _retry_key(comic_name, release_date_obj)
-            comics_map[key] = {
-                "series_name": comic_name,
-                "issue_number": None,
-                "release_date": release_date_obj,
-                "source": "release",
-            }
-
-    for retry_entry in retry_list:
-        try:
-            release_date_obj = datetime.strptime(
-                retry_entry.get("release_date", ""), "%Y-%m-%d"
-            ).date()
-        except (TypeError, ValueError):
-            logger.warning(
-                f"Skipping retry entry with invalid release date: {retry_entry!r}"
-            )
-            continue
-
-        comic_name = retry_entry.get("comic_name")
-        if not comic_name:
-            continue
-
-        key = _retry_key(comic_name, release_date_obj)
-        if key in comics_map:
-            comics_map[key]["source"] = "release+retry"
-        else:
-            comics_map[key] = {
-                "series_name": comic_name,
-                "issue_number": None,
-                "release_date": release_date_obj,
-                "source": "retry",
-            }
-
-    return list(comics_map.values())
 
 
 # --- AirDC++ Interaction ---
@@ -1600,143 +1233,250 @@ def log_level_type(value):
 
 def main():
     """
-    Main function for the Comic Grabber Bot.
-
-    Normal behavior:
-    - Synchronize the LCG pull list on every run.
-    - On Wednesday, search today's pull-list releases.
-    - On every day, search all unresolved comics in `retry_list.json`.
-    - Add failed searches/downloads to the retry list.
-    - Remove retry entries as soon as a comic is queued or confirmed to already exist.
-
-    Manual retry behavior:
-    - `--retry-missing` (or the legacy alias `--search-past-releases`) skips the
-      LCG refresh and processes only the existing retry list.
-
-    This separation prevents historical failures from disappearing when LCG refreshes
-    `pull_list.json` and removes releases whose dates are already in the past.
+    Main function to run the Comic Grabber Bot.
+    It handles command-line arguments, logs in to League of Comic Geeks,
+    updates the local JSON pull list, searches and downloads comics from AirDC++,
+    and sends Discord notifications for various events.
     """
     script_start_time = datetime.now()
 
-    # Setup command-line argument parsing.
+    # Setup command-line argument parsing
     parser = argparse.ArgumentParser(
-        description=(
-            "Monitors League of Comic Geeks, downloads Wednesday releases through "
-            "AirDC++, and automatically retries unresolved comics from retry_list.json."
-        )
+        description="Monitors League of Comic Geeks pull list, stores future releases in a JSON file, and downloads today's releases from AirDC++."
     )
     parser.add_argument(
         "--excel-file",
         "-f",
         type=str,
-        help=(
-            "Path to a previously downloaded LCG pull-list Excel file. The file is "
-            "used instead of downloading a fresh export."
-        ),
+        help="Path to a previously downloaded LCG pull list Excel file. If provided, "
+        "the script will read this file to update the JSON database and then exit. "
+        "It will NOT perform daily AirDC++ searches in this mode.",
     )
     parser.add_argument(
-        "--retry-missing",
         "--search-past-releases",
-        dest="retry_missing",
         action="store_true",
-        help=(
-            "Process only unresolved comics in retry_list.json without refreshing "
-            "the LCG pull list. --search-past-releases is retained as a legacy alias."
-        ),
+        help="Search for all comics currently listed in the JSON file with a release date today or in the past.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=(
-            "Search and validate normally, but do not initiate downloads or modify "
-            "retry_list.json. Discord messages are marked as dry-run notifications."
-        ),
+        help="Perform a dry run: search for comics but do not initiate actual downloads or send live Discord notifications (notifications will be marked as dry run).",
     )
     parser.add_argument(
         "--log-level",
-        type=log_level_type,
+        type=log_level_type,  # Use the custom type function here
         default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level. Default: INFO.",
+        choices=[
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ],  # Keep choices for help message and basic validation
+        help="Set the logging level (e.g., INFO, DEBUG, WARNING). Default is INFO.",
     )
     args = parser.parse_args()
 
-    # Set logging level based on command-line argument.
-    numeric_log_level = getattr(logging, args.log_level, DEFAULT_LOG_LEVEL)
+    # Set logging level based on command-line argument
+    numeric_log_level = getattr(
+        logging, args.log_level, DEFAULT_LOG_LEVEL
+    )  # args.log_level is already uppercase now
     logger.setLevel(numeric_log_level)
     console_handler.setLevel(numeric_log_level)
-    if file_handler:
+    if file_handler:  # Only set if file_handler was successfully created
         file_handler.setLevel(numeric_log_level)
 
-    # Clean up old logs at the start of the main execution.
+    # Clean up old logs at the start of the main execution
     cleanup_old_logs()
 
-    today_date = datetime.now().date()
-    is_wednesday = today_date.weekday() == 2  # Monday=0, Wednesday=2
+    # Get current day of the week (Monday is 0, Wednesday is 2)
+    today_weekday = datetime.now().weekday()
+    is_wednesday = today_weekday == 2  # 2 represents Wednesday
 
+    # Send script started notification
     logger.info("--- Starting Comic Grabber Bot ---")
     send_discord_notification(
         webhook_url=DISCORD_WEBHOOK_URL,
         title="Comic Grabber Bot",
-        description=(
-            f"Script execution commenced at: "
-            f"{script_start_time.strftime('%Y-%m-%d %H:%M:%S')}"
-        ),
-        color=0x3498DB,
+        description=f"Script execution commenced at: {script_start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+        color=0x3498DB,  # Blue color for informational start
         is_dry_run=args.dry_run,
     )
 
-    # -------------------------------------------------------------------------
-    # Step 1: Refresh the normal LCG pull list unless this is an explicit
-    # retry-only run. The retry database is intentionally never rebuilt from LCG.
-    # -------------------------------------------------------------------------
-    json_update_success = True
-    pulled_comics_source_file = None
-    file_was_downloaded = False
-
-    if args.retry_missing:
+    if (
+        not is_wednesday
+        and not args.excel_file
+        and not args.search_past_releases
+    ):
         logger.info(
-            "Retry-only mode enabled. Using existing retry_list.json without refreshing LCG."
+            f"Today is not Wednesday ({datetime.now().strftime('%A')}). Downloading and updating pull list only."
         )
-    else:
-        if args.excel_file:
-            if os.path.exists(args.excel_file):
-                pulled_comics_source_file = args.excel_file
-                logger.info(f"Using provided Excel file: {pulled_comics_source_file}")
-            else:
-                logger.error(
-                    f"Provided Excel file '{args.excel_file}' was not found. "
-                    "Falling back to a fresh LCG download."
-                )
-                pulled_comics_source_file = login_and_download_pull_list()
-                file_was_downloaded = bool(pulled_comics_source_file)
-        else:
-            pulled_comics_source_file = login_and_download_pull_list()
-            file_was_downloaded = bool(pulled_comics_source_file)
+        send_discord_notification(
+            webhook_url=DISCORD_WEBHOOK_URL,
+            title="Pull List Sync Only",
+            description=f"Today is {datetime.now().strftime('%A')}. Only updating the comic pull list. No downloads will be attempted.",
+            color=0x00BFFF,  # Deep Sky Blue
+            is_dry_run=args.dry_run,
+        )
 
+        pulled_comics_source_file = login_and_download_pull_list()
         if pulled_comics_source_file:
             json_update_success = update_json_pull_list_from_excel(
                 pulled_comics_source_file
             )
+            if json_update_success:
+                logger.info("Pull list downloaded and JSON file updated successfully.")
+
+                # Load comics from the JSON file for next Wednesday's release check
+                all_comics_from_json_for_upcoming = []
+                if os.path.exists(PULL_LIST_DB_FILE):
+                    try:
+                        with open(PULL_LIST_DB_FILE, "r", encoding="utf-8") as f:
+                            all_comics_from_json_for_upcoming = json.load(f)
+                    except (json.JSONDecodeError, FileNotFoundError) as e:
+                        logger.error(
+                            f"Error reading or parsing {PULL_LIST_DB_FILE} for upcoming releases: {e}."
+                        )
+                        send_discord_notification(
+                            webhook_url=DISCORD_WEBHOOK_URL,
+                            title="Error: JSON Read Failed for Upcoming",
+                            description=f"Error reading or parsing {PULL_LIST_DB_FILE} for upcoming releases: {e}.",
+                            color=0xFF0000,
+                            is_dry_run=args.dry_run,
+                        )
+
+                # Check for next Wednesday releases even on non-Wednesday
+                _check_next_wednesday_releases(
+                    all_comics_from_json_for_upcoming, args.dry_run
+                )
+
+            else:
+                logger.error(
+                    "Failed to update JSON pull list from downloaded Excel file."
+                )
+
+            try:
+                os.remove(pulled_comics_source_file)
+                logger.info(f"Cleaned up downloaded file: {pulled_comics_source_file}")
+            except Exception as e:
+                logger.warning(
+                    f"Warning: Could not remove temporary file {pulled_comics_source_file}: {e}"
+                )
         else:
-            json_update_success = False
             logger.error(
-                "Could not obtain an LCG pull list. Continuing with existing local "
-                "pull/retry data so pending retries can still be attempted."
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Warning: LCG Pull List Unavailable",
-                description=(
-                    "The LCG pull list could not be refreshed. Existing local data "
-                    "will be used and pending retry entries will still be processed."
-                ),
-                color=0xFF8C00,
-                is_dry_run=args.dry_run,
+                "Failed to download pull list from LCG. Cannot update JSON file."
             )
 
-        # Clean up only files downloaded by this run. A user-provided --excel-file
-        # is intentionally left untouched.
+        script_end_time = datetime.now()
+        script_duration = script_end_time - script_start_time
+        send_discord_notification(
+            webhook_url=DISCORD_WEBHOOK_URL,
+            title="Comic Grabber Bot Status (Non-Wednesday)",
+            description=(
+                f"Script execution completed at: {script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Duration: {script_duration}"
+            ),
+            color=0x3498DB,  # Blue color for informational end
+            is_dry_run=args.dry_run,
+        )
+        return  # Exit if not Wednesday and not running with --excel-file
+
+    # --- Logic for Wednesday, --excel-file, or --search-past-releases ---
+    check_date = datetime.now().date()
+
+    if args.search_past_releases:
+        logger.info(
+            "Running with --search-past-releases. "
+            "Searching existing pull_list.json without refreshing from LCG."
+        )
+    elif is_wednesday:
+        logger.info(
+            f"Today is Wednesday. Checking for comics released on: "
+            f"{check_date.strftime('%Y-%m-%d')}"
+        )
+    elif args.excel_file:
+        logger.info(
+            "Running with --excel-file. Processing provided pull list."
+        )
+
+    # Determine source of pull list
+    pulled_comics_source_file = None
+    file_was_downloaded = False
+
+    if args.search_past_releases:
+        # Historical search mode:
+        # Use the existing pull_list.json exactly as-is.
+        #
+        # Do NOT refresh from LCG first because update_json_pull_list_from_excel()
+        # intentionally removes comics whose release dates are older than today.
+        logger.info(
+            "--search-past-releases enabled. "
+            "Using existing pull_list.json without refreshing from LCG."
+        )
+
+        # No Excel file is needed in this mode.
+        pulled_comics_source_file = None
+
+        # Mark the "update" stage successful because we're deliberately
+        # skipping the LCG synchronization.
+        json_update_success = True
+
+    elif args.excel_file:
+        if os.path.exists(args.excel_file):
+            pulled_comics_source_file = args.excel_file
+            logger.info(
+                f"Using provided Excel file: {pulled_comics_source_file}"
+            )
+            file_was_downloaded = False
+
+        else:
+            logger.error(
+                f"Error: Provided Excel file '{args.excel_file}' not found. "
+                "Proceeding with fresh download."
+            )
+
+            pulled_comics_source_file = login_and_download_pull_list()
+
+            if pulled_comics_source_file:
+                file_was_downloaded = True
+
+    else:
+        # Normal Wednesday operation:
+        # download a fresh pull list from League of Comic Geeks.
+        pulled_comics_source_file = login_and_download_pull_list()
+
+        if pulled_comics_source_file:
+            file_was_downloaded = True
+
+
+    # ------------------------------------------------------------
+    # Update pull_list.json only during normal/Excel operation.
+    #
+    # --search-past-releases deliberately skips this entire block
+    # so historical entries are not deleted before they are searched.
+    # ------------------------------------------------------------
+    if not args.search_past_releases:
+
+        if not pulled_comics_source_file:
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="Critical Error: LCG Pull List Failed",
+                description=(
+                    "Could not obtain LCG pull list "
+                    "(no file provided or download failed). Exiting."
+                ),
+                color=0xFF0000,
+                is_dry_run=args.dry_run,
+            )
+            return
+
+        # Normal mode: synchronize from LCG before searching.
+        json_update_success = update_json_pull_list_from_excel(
+            pulled_comics_source_file
+        )
+
+        # Clean up the downloaded temporary Excel file if this run
+        # downloaded it from League of Comic Geeks.
         if (
             file_was_downloaded
             and pulled_comics_source_file
@@ -1745,158 +1485,168 @@ def main():
             try:
                 os.remove(pulled_comics_source_file)
                 logger.info(
-                    f"Cleaned up downloaded file: {pulled_comics_source_file}"
+                    f"Cleaned up downloaded file: "
+                    f"{pulled_comics_source_file}"
                 )
-            except OSError as e:
+            except Exception as e:
                 logger.warning(
-                    f"Could not remove temporary file {pulled_comics_source_file}: {e}"
+                    f"Warning: Could not remove temporary file "
+                    f"{pulled_comics_source_file}: {e}"
                 )
 
-    # -------------------------------------------------------------------------
-    # Step 2: Load the two independent data stores.
-    # - pull_list.json: current/upcoming LCG schedule
-    # - retry_list.json: unresolved comics only
-    # -------------------------------------------------------------------------
-    all_comics_from_json = load_pull_list()
-    retry_list = load_retry_list()
-
-    # Create an explicit empty retry database on first run so its state is visible
-    # even before the first failure occurs. Dry runs never create or change files.
-    if not args.dry_run and not os.path.exists(RETRY_LIST_DB_FILE):
-        save_retry_list(retry_list)
-
-    logger.info(
-        f"Loaded {len(all_comics_from_json)} pull-list comic(s) and "
-        f"{len(retry_list)} pending retry comic(s)."
-    )
-
-    # -------------------------------------------------------------------------
-    # Step 3: Build the work list.
-    # Normal runs process today's releases only on Wednesday PLUS every retry.
-    # Retry-only mode processes only retry_list.json.
-    # -------------------------------------------------------------------------
-    include_today_releases = is_wednesday and not args.retry_missing
-    comics_to_search = build_comics_to_process(
-        pull_list=all_comics_from_json,
-        retry_list=retry_list,
-        today_date=today_date,
-        include_today_releases=include_today_releases,
-    )
-
-    if include_today_releases:
-        today_release_count = sum(
-            1
-            for comic in comics_to_search
-            if comic.get("source") in ("release", "release+retry")
-        )
+    # If --excel-file was provided, we've just updated the JSON, so exit.
+    if args.excel_file and not is_wednesday:  # Added check for is_wednesday
         logger.info(
-            f"Found {today_release_count} release-day comic(s) for {today_date}."
+            "--- Excel file provided on non-Wednesday. JSON pull list updated. Exiting without daily download check. ---"
         )
-
-    if retry_list:
-        logger.info(
-            f"Retry queue contains {len(retry_list)} unresolved comic(s) to re-search."
-        )
-
-    if not comics_to_search:
-        if args.retry_missing:
-            logger.info(f"No pending comics in {RETRY_LIST_DB_FILE}.")
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="Retry Queue Empty",
-                description=f"No unresolved comics are currently stored in `{RETRY_LIST_DB_FILE}`.",
-                color=0x00FF00,
-                is_dry_run=args.dry_run,
-            )
-        elif is_wednesday:
-            logger.info(
-                f"No comics require processing today ({today_date})."
-            )
-            send_discord_notification(
-                webhook_url=DISCORD_WEBHOOK_URL,
-                title="No Comics for Today",
-                description=(
-                    f"No release-day or retry comics require processing today "
-                    f"({today_date})."
-                ),
-                color=0xFFFF00,
-                is_dry_run=args.dry_run,
-            )
-        else:
-            logger.info(
-                f"Today is {datetime.now().strftime('%A')}; no pending retries require processing."
-            )
-
-        # Upcoming-release reporting remains based only on the normal LCG pull list.
-        _check_next_wednesday_releases(all_comics_from_json, args.dry_run)
-
-        script_end_time = datetime.now()
-        script_duration = script_end_time - script_start_time
-        logger.info("--- Comic Grabber Bot Finished ---")
         send_discord_notification(
             webhook_url=DISCORD_WEBHOOK_URL,
-            title="Comic Grabber Bot Status",
-            description=(
-                f"Script execution completed at: "
-                f"{script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Duration: {script_duration}"
-            ),
+            title="JSON Sync Complete (via --excel-file)",
+            description="Excel file provided. JSON pull list updated.",
             color=0x3498DB,
             is_dry_run=args.dry_run,
         )
         return
 
-    logger.info(
-        f"Found {len(comics_to_search)} comic(s) to process for download/retry."
-    )
+    # --- Proceed with Daily Download Check (only if not in --excel-file mode and it IS Wednesday, or if --excel-file was used with search-past-releases) ---
+    if not json_update_success:
+        send_discord_notification(
+            webhook_url=DISCORD_WEBHOOK_URL,
+            title="Error: JSON Update Failed",
+            description="JSON pull list update from LCG failed. Skipping daily download check.",
+            color=0xFF0000,
+            is_dry_run=args.dry_run,
+        )
+        return
 
-    grabbed_count = 0
-    skipped_count = 0
-    failed_count = 0
-    resolved_retry_count = 0
-
-    # -------------------------------------------------------------------------
-    # Step 4: Search/download each comic and maintain retry_list.json immediately.
-    # Writing retry changes after each comic protects state if a later comic crashes.
-    # -------------------------------------------------------------------------
-    for comic in comics_to_search:
-        comic_title_full = comic["series_name"]
-        release_date_string = comic["release_date"].strftime("%Y-%m-%d")
-        source = comic.get("source", "unknown")
-
-        logger.info(
-            f"Processing comic: {comic_title_full} "
-            f"(Release Date: {release_date_string}, Source: {source})"
+    # Load comics from the JSON file for today's release check
+    all_comics_from_json = []
+    if os.path.exists(PULL_LIST_DB_FILE):
+        try:
+            with open(PULL_LIST_DB_FILE, "r", encoding="utf-8") as f:
+                all_comics_from_json = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            logger.error(
+                f"Error reading or parsing {PULL_LIST_DB_FILE} for releases: {e}. Skipping daily check."
+            )
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="Error: JSON Read Failed",
+                description=f"Error reading or parsing {PULL_LIST_DB_FILE} for releases: {e}. Skipping daily check.",
+                color=0xFF0000,
+                is_dry_run=args.dry_run,
+            )
+    else:
+        logger.warning(
+            f"JSON pull list file '{PULL_LIST_DB_FILE}' not found. No comics to check today."
+        )
+        send_discord_notification(
+            webhook_url=DISCORD_WEBHOOK_URL,
+            title="Warning: JSON File Not Found",
+            description=f"JSON pull list file '{PULL_LIST_DB_FILE}' not found. No comics to check today.",
+            color=0xFFFF00,
+            is_dry_run=args.dry_run,
         )
 
+    comics_to_search = []
+    today_date = datetime.now().date()
+    for comic_data in all_comics_from_json:
+        release_date_obj = datetime.strptime(
+            comic_data.get("release_date"), "%Y-%m-%d"
+        ).date()
+        if args.search_past_releases:
+            if release_date_obj <= today_date:
+                comics_to_search.append(
+                    {
+                        "series_name": comic_data.get("comic_name"),
+                        "issue_number": None,
+                        "release_date": release_date_obj,
+                    }
+                )
+        elif (
+            release_date_obj == today_date
+        ):  # Only check today's releases if not searching past
+            comics_to_search.append(
+                {
+                    "series_name": comic_data.get("comic_name"),
+                    "issue_number": None,
+                    "release_date": release_date_obj,
+                }
+            )
+
+    if args.search_past_releases:
+        logger.info(
+            f"Found {len(comics_to_search)} comics in {PULL_LIST_DB_FILE} to search for (including past releases)."
+        )
+    else:
+        logger.info(
+            f"Found {len(comics_to_search)} comics released today in {PULL_LIST_DB_FILE}."
+        )
+
+    if not comics_to_search:
+        if args.search_past_releases:
+            logger.info(
+                f"No comics found in your JSON file to search for (even including past releases)."
+            )
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="No Comics Found (Past Releases)",
+                description=f"No comics found in your JSON file to search for (even including past releases).",
+                color=0xFFFF00,
+                is_dry_run=args.dry_run,
+            )
+        else:
+            logger.info(
+                f"No comics from your pull list are released today ({check_date.strftime('%Y-%m-%d')})."
+            )
+            send_discord_notification(
+                webhook_url=DISCORD_WEBHOOK_URL,
+                title="No Comics for Today",
+                description=f"No comics from your pull list are released today ({check_date.strftime('%Y-%m-%d')}).",
+                color=0xFFFF00,
+                is_dry_run=args.dry_run,
+            )
+        # Check for next Wednesday releases even if no comics are for today/past
+        _check_next_wednesday_releases(all_comics_from_json, args.dry_run)
+        return
+
+    logger.info(f"Found {len(comics_to_search)} comics to process for download.")
+    grabbed_count = 0
+    skipped_count = 0  # Added skipped count
+    failed_count = 0
+
+    # Iterate through selected comics and attempt download via AirDC++
+    for comic in comics_to_search:
+        comic_title_full = f"{comic['series_name']}"
+        logger.info(
+            f"Processing comic: {comic_title_full} (Release Date: {comic['release_date'].strftime('%Y-%m-%d')})"
+        )
+
+        # search_airdcpp now returns a tuple: (found_match_info, session_search_id)
         found_match_info, session_id_for_search = search_airdcpp(
             comic_title_full,
             expected_year=comic["release_date"].year,
             is_dry_run=args.dry_run,
         )
 
-        if found_match_info and session_id_for_search:
-            download_result = download_airdcpp(
-                found_match_info,
-                session_id_for_search,
-                is_dry_run=args.dry_run,
+        if found_match_info and session_id_for_search:  # Ensure both are returned
+            # `found_match_info` now contains 'id', 'name', 'path', 'size', 'tth'
+            # We no longer construct a `target_path_hint` here in the main loop,
+            # as download_airdcpp will derive `target_name` from `found_match_info['name']`.
+
+            download_result = (
+                download_airdcpp(  # Changed variable name to download_result
+                    found_match_info, session_id_for_search, is_dry_run=args.dry_run
+                )
             )
 
-            if download_result is True:
+            if download_result is True:  # Check if it's explicitly True for success
                 grabbed_count += 1
-                if remove_from_retry_list(
-                    retry_list,
-                    comic,
-                    resolution="download queued successfully",
-                    is_dry_run=args.dry_run,
-                ):
-                    resolved_retry_count += 1
-
                 notification_message = (
                     f"**Queued download for:** {comic_title_full}\n"
                     f"Found file: `{found_match_info['path']}`\n"
-                    f"Size: {round(found_match_info['size'] / (1024 * 1024), 2)} MB\n"
-                    f"Will download as: `{found_match_info['name']}`"
+                    f"Size: {round(found_match_info['size'] / (1024*1024), 2)} MB\n"
+                    f"Will download to AirDC++'s default folder as: `{found_match_info['name']}`"
                 )
                 send_discord_notification(
                     webhook_url=DISCORD_WEBHOOK_URL,
@@ -1905,90 +1655,48 @@ def main():
                     color=0x00FF00,
                     is_dry_run=args.dry_run,
                 )
-
-            elif download_result == "skipped":
+            elif download_result == "skipped":  # Check if it's "skipped"
                 skipped_count += 1
-                if remove_from_retry_list(
-                    retry_list,
-                    comic,
-                    resolution="already exists on disk or in AirDC++ queue",
-                    is_dry_run=args.dry_run,
-                ):
-                    resolved_retry_count += 1
-                # `download_airdcpp()` already sends the detailed Discord message.
-
-            else:
+                # Notification is already sent within download_airdcpp for this case
+            else:  # Must be False for a general failure
                 failed_count += 1
-                add_or_update_retry(
-                    retry_list,
-                    comic,
-                    failure_reason="valid file found but AirDC++ download queue request failed",
-                    is_dry_run=args.dry_run,
-                )
-
         else:
             failed_count += 1
-
-            # If a search session existed, AirDC++ was reachable but no candidate
-            # survived validation/search. If there is no session ID, the failure was
-            # earlier (authentication/API/search-instance failure). Both are retryable.
-            if session_id_for_search:
-                failure_reason = "no validated comic file found on AirDC++"
-            else:
-                failure_reason = "AirDC++ search unavailable or could not be started"
-
             logger.info(
-                f"No suitable file found for {comic_title_full}. "
-                f"Adding/updating retry queue: {failure_reason}."
+                f"No suitable file found on AirDC++ for {comic_title_full}. Skipping download."
             )
-            add_or_update_retry(
-                retry_list,
-                comic,
-                failure_reason=failure_reason,
-                is_dry_run=args.dry_run,
-            )
-
+            # Notification for "No Download Found" is already sent within search_airdcpp if match is None
         time.sleep(1)
 
-    # Reload from disk after processing so the final pending count reflects exactly
-    # what was persisted. In dry-run mode, use the unchanged in-memory queue.
-    if not args.dry_run:
-        retry_list = load_retry_list()
-
-    # Upcoming-release reporting always uses the normal LCG pull list rather than
-    # the retry database.
+    # After processing today's/past releases, check for next Wednesday
     _check_next_wednesday_releases(all_comics_from_json, args.dry_run)
 
-    script_end_time = datetime.now()
+    script_end_time = datetime.now()  # Define script_end_time here
     script_duration = script_end_time - script_start_time
 
-    logger.info("--- Comic Grabber Bot Finished ---")
+    logger.info(f"--- Comic Grabber Bot Finished ---")
     final_message = (
-        f"**Run Complete!**\n"
+        f"**Daily Run Complete!**\n"
         f"Successfully queued: {grabbed_count} comic(s)\n"
-        f"Skipped (already exists): {skipped_count} comic(s)\n"
-        f"Failed/requeued: {failed_count} comic(s)\n"
-        f"Resolved retry entries: {resolved_retry_count} comic(s)\n"
-        f"Retry queue remaining: {len(retry_list)} comic(s)"
+        f"Skipped (already exists): {skipped_count} comic(s)\n"  # Added skipped count to summary
+        f"Failed to find/queue: {failed_count} comic(s)"
     )
     send_discord_notification(
         webhook_url=DISCORD_WEBHOOK_URL,
-        title="Comic Grabber Run Summary",
+        title="Daily Run Summary",
         description=final_message,
         color=0x00FF00 if failed_count == 0 else 0xFF8C00,
         is_dry_run=args.dry_run,
     )
-
+    # Send final script status notification
     send_discord_notification(
         webhook_url=DISCORD_WEBHOOK_URL,
         title="Comic Grabber Bot Status",
         description=(
-            f"Script execution completed at: "
-            f"{script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Duration: {script_duration}\n"
-            f"LCG refresh successful: {json_update_success}"
+            f"Script execution completed at: {script_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Duration: {script_duration}"
         ),
-        color=0x3498DB,
+        color=0x3498DB,  # Blue color for informational end
         is_dry_run=args.dry_run,
     )
 
