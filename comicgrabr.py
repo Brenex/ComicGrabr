@@ -1470,29 +1470,29 @@ def main():
             )
             return
 
-    # Normal mode: synchronize from LCG before searching.
-    json_update_success = update_json_pull_list_from_excel(
-        pulled_comics_source_file
-    )
+        # Normal mode: synchronize from LCG before searching.
+        json_update_success = update_json_pull_list_from_excel(
+            pulled_comics_source_file
+        )
 
-    # Clean up the downloaded temporary Excel file if this run
-    # downloaded it from League of Comic Geeks.
-    if (
-        file_was_downloaded
-        and pulled_comics_source_file
-        and os.path.exists(pulled_comics_source_file)
-    ):
-        try:
-            os.remove(pulled_comics_source_file)
-            logger.info(
-                f"Cleaned up downloaded file: "
-                f"{pulled_comics_source_file}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Warning: Could not remove temporary file "
-                f"{pulled_comics_source_file}: {e}"
-            )
+        # Clean up the downloaded temporary Excel file if this run
+        # downloaded it from League of Comic Geeks.
+        if (
+            file_was_downloaded
+            and pulled_comics_source_file
+            and os.path.exists(pulled_comics_source_file)
+        ):
+            try:
+                os.remove(pulled_comics_source_file)
+                logger.info(
+                    f"Cleaned up downloaded file: "
+                    f"{pulled_comics_source_file}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Warning: Could not remove temporary file "
+                    f"{pulled_comics_source_file}: {e}"
+                )
 
     # If --excel-file was provided, we've just updated the JSON, so exit.
     if args.excel_file and not is_wednesday:  # Added check for is_wednesday
