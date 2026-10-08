@@ -264,7 +264,11 @@ def send_discord_notification(
                 files=files,
             )
         else:
-            response = requests.post(webhook_url, json=payload)
+            requests.post(
+                webhook_url,
+                json=payload,
+                timeout=15,
+            )
 
         response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
         logger.info("Successfully sent Discord notification.")
