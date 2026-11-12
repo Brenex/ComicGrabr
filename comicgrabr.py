@@ -94,6 +94,12 @@ RETRY_LIST_DB_FILE = os.path.join(
     SCRIPT_DIR, "retry_list.json"
 )  # Persistent queue containing only unresolved comics
 
+# Releases in October-December may legitimately carry the following year in
+# distributor/archive filenames because publishers often advance cover dates.
+# The rollover exception remains narrow: it is only accepted when the issue
+# number and normalized series title match exactly.
+LATE_YEAR_ROLLOVER_START_MONTH = 10
+
 # Network timeout for Discord notifications. A notification failure must never
 # stall the comic-processing workflow indefinitely.
 DISCORD_REQUEST_TIMEOUT = 15
@@ -1154,14 +1160,31 @@ def parse_result_filename(path):
     }
 
 
-def validate_comic_result(comic_name, result_path, expected_year):
+def validate_comic_result(
+    comic_name,
+    result_path,
+    expected_year,
+    release_date=None,
+):
     """
     Validate an AirDC++ result against the requested comic.
 
-    Returns:
-        (score, reason)
+    Validation normally requires the filename year to match the comic's actual
+    release year. For comics released late in the calendar year (October through
+    December), publishers/distributors may label an issue with the following
+    year's cover date. In that specific case, ``expected_year + 1`` is allowed
+    only when both the issue number and normalized series title match exactly.
 
-    score is None when the candidate should be rejected.
+    Args:
+        comic_name (str): Requested comic title including the issue number.
+        result_path (str): Candidate AirDC++ file path.
+        expected_year (int): Calendar year of the actual release date.
+        release_date (date, optional): Actual comic release date. Supplying this
+            enables the narrow late-year cover-date rollover exception.
+
+    Returns:
+        tuple: ``(score, reason)``. ``score`` is None when the candidate should
+        be rejected.
     """
 
     requested = parse_requested_comic(comic_name)
@@ -1173,7 +1196,7 @@ def validate_comic_result(comic_name, result_path, expected_year):
     if candidate is None:
         return None, "Unable to parse candidate filename"
 
-    # HARD GATE #1: exact issue number
+    # HARD GATE #1: issue number must always match exactly.
     if candidate["issue"] != requested["issue"]:
         return (
             None,
@@ -1181,16 +1204,48 @@ def validate_comic_result(comic_name, result_path, expected_year):
             f"found {candidate['issue']}",
         )
 
-    # HARD GATE #2: year
-    if candidate["year"] != expected_year:
+    requested_title = normalize_title(requested["title"])
+    candidate_title = normalize_title(candidate["title"])
+
+    # Determine whether this request is eligible for the narrow cover-date
+    # rollover exception. October-December releases may legitimately appear as
+    # the following year in publisher/distributor filenames.
+    late_year_release = (
+        release_date is not None
+        and release_date.year == expected_year
+        and release_date.month >= LATE_YEAR_ROLLOVER_START_MONTH
+    )
+
+    rollover_year_match = (
+        late_year_release
+        and candidate["year"] == expected_year + 1
+    )
+
+    # HARD GATE #2: filename year.
+    #
+    # Normal case: candidate year must equal expected_year.
+    # Late-year exception: expected_year + 1 is accepted only with an exact
+    # normalized title match. This prevents a loose title-similarity match from
+    # using the rollover exception to select a different series.
+    if candidate["year"] != expected_year and not rollover_year_match:
+        allowed_years = str(expected_year)
+        if late_year_release:
+            allowed_years += (
+                f" or {expected_year + 1} for an exact-title late-year rollover"
+            )
         return (
             None,
-            f"Year mismatch: wanted {expected_year}, "
+            f"Year mismatch: wanted {allowed_years}, "
             f"found {candidate['year']}",
         )
 
-    requested_title = normalize_title(requested["title"])
-    candidate_title = normalize_title(candidate["title"])
+    if rollover_year_match and candidate_title != requested_title:
+        return (
+            None,
+            "Late-year rollover title mismatch: "
+            f"wanted exact normalized title '{requested_title}', "
+            f"found '{candidate_title}'",
+        )
 
     similarity = SequenceMatcher(
         None,
@@ -1198,7 +1253,8 @@ def validate_comic_result(comic_name, result_path, expected_year):
         candidate_title,
     ).ratio()
 
-    # HARD GATE #3: title similarity
+    # HARD GATE #3: title similarity for normal same-year candidates. The
+    # rollover path above is stricter and already requires exact normalized title.
     if similarity < 0.80:
         return (
             None,
@@ -1206,9 +1262,16 @@ def validate_comic_result(comic_name, result_path, expected_year):
             f"('{requested['title']}' vs '{candidate['title']}')",
         )
 
+    if rollover_year_match:
+        return (
+            similarity,
+            f"Valid late-year cover-date rollover match ({expected_year} release, "
+            f"{candidate['year']} filename)",
+        )
+
     return similarity, "Valid match"
 
-def search_airdcpp(comic_name, expected_year, is_dry_run=False):
+def search_airdcpp(comic_name, expected_year, release_date=None, is_dry_run=False):
     """
     Performs the three-step AirDC++ search process:
     1. Creates a search instance.
@@ -1217,7 +1280,12 @@ def search_airdcpp(comic_name, expected_year, is_dry_run=False):
 
     Args:
         comic_name (str): The name of the comic to search for.
-        is_dry_run (bool, optional): If True, indicates a dry run, affecting notifications. Defaults to False.
+        expected_year (int): Calendar year of the actual comic release.
+        release_date (date, optional): Actual comic release date. Used to permit
+            the tightly constrained next-year cover-date match for October-December
+            releases.
+        is_dry_run (bool, optional): If True, indicates a dry run, affecting
+            notifications. Defaults to False.
 
     Returns:
         tuple: A tuple containing (dict, str) if a suitable match is found,
@@ -1250,6 +1318,18 @@ def search_airdcpp(comic_name, expected_year, is_dry_run=False):
     patterns_to_try = [
         f"{comic_name} {expected_year}",
     ]
+
+    # Late-year issues may be distributed with the following year's cover date.
+    # Search that year as a fallback as well; validation still requires an exact
+    # normalized title and exact issue number before accepting the rollover.
+    if (
+        release_date is not None
+        and release_date.year == expected_year
+        and release_date.month >= LATE_YEAR_ROLLOVER_START_MONTH
+    ):
+        patterns_to_try.append(
+            f"{comic_name} {expected_year + 1}"
+        )
 
     last_session_search_id = None
 
@@ -1452,6 +1532,7 @@ def search_airdcpp(comic_name, expected_year, is_dry_run=False):
                         comic_name,
                         candidate["path"],
                         expected_year,
+                        release_date=release_date,
                     )
 
                     if score is None:
@@ -1906,6 +1987,7 @@ def main():
         found_match_info, session_id_for_search = search_airdcpp(
             comic_title_full,
             expected_year=comic["release_date"].year,
+            release_date=comic["release_date"],
             is_dry_run=args.dry_run,
         )
 
