@@ -44,8 +44,15 @@ from discord_webhook import (
 from dotenv import load_dotenv  # For loading environment variables from a .env file
 
 # --- CONFIGURATION START ---
-# Load environment variables from .env file
-load_dotenv()
+# Resolve all persistent/runtime paths relative to this script rather than the
+# process working directory. This is important when ComicGrabr is launched by
+# cron, Unraid User Scripts, systemd, or another wrapper that may use a different
+# current working directory.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load environment variables from the .env file stored beside this script.
+ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
+load_dotenv(ENV_FILE)
 
 # Define log retention for the script's own log files
 LOG_RETENTION_DAYS = 56
@@ -77,9 +84,19 @@ AIRDCPP_INSTANCE_ID = os.getenv(
 
 LOGIN_URL = "https://leagueofcomicgeeks.com/login"
 EXPORT_URL = "https://leagueofcomicgeeks.com/member/export_pulls"
-OUTPUT_FILENAME = "league_of_comic_geeks_pulls.xls"  # Temporary LCG export file
-PULL_LIST_DB_FILE = "pull_list.json"  # The JSON file to store the current/upcoming LCG pull list
-RETRY_LIST_DB_FILE = "retry_list.json"  # Persistent queue containing only unresolved comics
+OUTPUT_FILENAME = os.path.join(
+    SCRIPT_DIR, "league_of_comic_geeks_pulls.xls"
+)  # Temporary LCG export file
+PULL_LIST_DB_FILE = os.path.join(
+    SCRIPT_DIR, "pull_list.json"
+)  # The JSON file to store the current/upcoming LCG pull list
+RETRY_LIST_DB_FILE = os.path.join(
+    SCRIPT_DIR, "retry_list.json"
+)  # Persistent queue containing only unresolved comics
+
+# Network timeout for Discord notifications. A notification failure must never
+# stall the comic-processing workflow indefinitely.
+DISCORD_REQUEST_TIMEOUT = 15
 # DOWNLOADED_TTHS_FILE = "downloaded_tths.json" # Removed - No longer needed
 
 # User-Agent header to mimic a web browser
@@ -254,30 +271,42 @@ def send_discord_notification(
             log_file_path = None  # Don't try to send file if opening failed
 
     logger.debug(f"Attempting to send Discord notification to: {webhook_url}")
+
+    # Initialize response explicitly so later error handling can never reference an
+    # unassigned local variable if requests.post() itself fails before returning.
+    response = None
+
     try:
         if files:
-            # When sending files, the payload must be sent as a separate 'payload_json' part
-            # and the 'Content-Type' is handled by requests with 'multipart/form-data'
+            # When sending files, the payload must be sent as a separate
+            # 'payload_json' part. requests handles the multipart Content-Type.
             response = requests.post(
                 webhook_url,
                 data={"payload_json": requests.utils.quote(json.dumps(payload))},
                 files=files,
+                timeout=DISCORD_REQUEST_TIMEOUT,
             )
         else:
-            requests.post(
+            response = requests.post(
                 webhook_url,
                 json=payload,
-                timeout=15,
+                timeout=DISCORD_REQUEST_TIMEOUT,
             )
 
         response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
         logger.info("Successfully sent Discord notification.")
+
     except requests.exceptions.HTTPError as errh:
-        logger.error(f"Discord HTTP Error: {errh} - {errh.response.text}")
+        response_text = (
+            errh.response.text if errh.response is not None else "No response body"
+        )
+        logger.error(f"Discord HTTP Error: {errh} - {response_text}")
     except requests.exceptions.ConnectionError as errc:
         logger.error(f"Discord Connection Error: {errc}")
     except requests.exceptions.Timeout as errt:
-        logger.error(f"Discord Timeout Error: {errt}")
+        logger.error(
+            f"Discord Timeout Error after {DISCORD_REQUEST_TIMEOUT} seconds: {errt}"
+        )
     except requests.exceptions.RequestException as err:
         logger.error(f"Discord Request Error: {err}")
     except Exception as e:
@@ -692,7 +721,8 @@ def save_retry_list(retry_list, is_dry_run=False):
         # written retry database if the process is interrupted during the write.
         os.replace(temp_path, RETRY_LIST_DB_FILE)
         logger.info(
-            f"Retry list saved: {len(retry_list)} pending comic(s) in {RETRY_LIST_DB_FILE}."
+            f"Retry list saved: {len(retry_list)} pending comic(s) in "
+            f"{RETRY_LIST_DB_FILE}."
         )
         return True
     except OSError as e:
